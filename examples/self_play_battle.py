@@ -9,7 +9,7 @@ locally trained models.
 Prerequisites:
 - Pokemon Showdown server running locally:
   cd server/pokemon-showdown && node pokemon-showdown start --no-security &
-- Environment variable set: export METAMON_CACHE_DIR=/path/to/storage
+- Environment variable set: export METAMON_CACHE_DIR=cache
 
 Example Usage:
     # 1. Self-play: Same HF model vs itself (generate training data)
@@ -17,8 +17,8 @@ Example Usage:
         --agent1 SyntheticRLV2 \
         --agent2 SyntheticRLV2 \
         --battle_format gen1ou \
-        --num_battles 100 \
-        --save_trajectories_to ./selfplay_data
+        --num_battles 100000 \
+        --save_trajectories_to ./self_play/synrl_selfplay_data
 
     # 2. Two different HF models
     python examples/self_play_battle.py \
@@ -38,7 +38,7 @@ Example Usage:
         --agent2_local_path saved_checkpoints/abra-semantic2-rl \
         --agent2_model_gin medium_multitask_semantic.gin \
         --agent2_train_gin binary_rl.gin \
-        --agent2_checkpoint 15 \
+        --agent2_checkpoint 14 \
         --battle_format gen9ou \
         --num_battles 5 \
         --save_trajectories_to ./local_vs_local_data
@@ -111,45 +111,6 @@ def load_model_from_args(args, agent_num: int):
 
         # Determine model name from path
         model_name = os.path.basename(local_path.rstrip('/'))
-
-        # Validate/find checkpoint file(s) for local runs
-        ckpt_dir = os.path.join(os.path.dirname(local_path), model_name, "ckpts", "policy_weights")
-        if not os.path.isdir(ckpt_dir):
-            raise FileNotFoundError(
-                f"Expected checkpoint directory not found for Agent {agent_num}: {ckpt_dir}"
-            )
-
-        # Enumerate available checkpoint epochs
-        available_epochs = []
-        try:
-            for fn in os.listdir(ckpt_dir):
-                if fn.startswith("policy_epoch_") and fn.endswith(".pt"):
-                    try:
-                        num = int(fn[len("policy_epoch_") : -len(".pt")])
-                        available_epochs.append(num)
-                    except ValueError:
-                        continue
-        except Exception:
-            pass
-
-        if not available_epochs:
-            raise FileNotFoundError(
-                f"No checkpoint files found for Agent {agent_num} in {ckpt_dir}"
-            )
-
-        # Choose checkpoint: respect requested if present, else fall back to latest
-        if checkpoint is None:
-            checkpoint = max(available_epochs)
-            print(
-                f"[Agent {agent_num}] No checkpoint specified; using latest available: epoch {checkpoint}"
-            )
-        elif checkpoint not in available_epochs:
-            fallback = max([e for e in available_epochs if e <= checkpoint] or available_epochs)
-            print(
-                f"[Agent {agent_num}] Requested checkpoint epoch {checkpoint} not found in {ckpt_dir}. "
-                f"Falling back to epoch {fallback} (available: {sorted(available_epochs)})."
-            )
-            checkpoint = fallback
 
         # Create LocalPretrainedModel
         # Note: This requires knowing the obs/action spaces used during training
