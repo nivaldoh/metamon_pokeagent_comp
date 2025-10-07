@@ -368,9 +368,11 @@ class PokeEnvWrapper(OpenAIGymEnv):
     @property
     def action_space(self):
         """Return action space, works even before full initialization."""
-        if self._initialized:
-            return super().action_space
-        return self._lazy_action_space
+        # During lazy init, or immediately after parent init, the backing
+        # attribute may not yet exist. Fall back to the lazy field.
+        if getattr(self, "_initialized", False) and hasattr(self, "_action_space"):
+            return self._action_space
+        return getattr(self, "_lazy_action_space", None)
 
     @action_space.setter
     def action_space(self, value):
@@ -385,9 +387,11 @@ class PokeEnvWrapper(OpenAIGymEnv):
     @property
     def observation_space(self):
         """Return observation space, works even before full initialization."""
-        if self._initialized:
-            return super().observation_space
-        return self._lazy_observation_space
+        if getattr(self, "_initialized", False) and hasattr(
+            self, "_observation_space"
+        ):
+            return self._observation_space
+        return getattr(self, "_lazy_observation_space", None)
 
     @observation_space.setter
     def observation_space(self, value):
@@ -635,6 +639,7 @@ class QueueOnLocalLadder(PokeEnvWrapper):
         self.player_username = player_username
         self.player_password = player_password
         self.num_battles = num_battles
+        self._ensure_initialized()
         self.handle_ladder_start(n_challenges=num_battles)
 
     def handle_ladder_start(self, n_challenges: int):

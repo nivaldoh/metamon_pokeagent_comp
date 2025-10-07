@@ -14,17 +14,18 @@ Prerequisites:
 Example Usage:
     # 1. Self-play: Same HF model vs itself (generate training data)
     python examples/self_play_battle.py \
-        --agent1 SyntheticRLV2 \
+        --agent1 SyntheticRLV1 \
         --agent2 SyntheticRLV2 \
         --battle_format gen1ou \
-        --num_battles 100000 \
+        --num_battles 10000 \
         --save_trajectories_to ./self_play/synrl_selfplay_data
+        -- concurrency 4
 
     # 2. Two different HF models
     python examples/self_play_battle.py \
-        --agent1 SmallRL \
+        --agent1 SyntheticRLV2 \
         --agent2 MediumRL \
-        --battle_format gen2ou \
+        --battle_format gen1ou \
         --num_battles 50
 
     # 3. Local model vs HF model
@@ -58,6 +59,7 @@ Example Usage:
 import os
 import sys
 import time
+import copy
 import multiprocessing as mp
 from argparse import ArgumentParser
 from typing import Optional, Dict, Any
@@ -349,6 +351,15 @@ def main():
         default=5,
         help="Seconds to delay before starting Agent 2 (helps ensure Agent 1 is ready)",
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help=(
+            "Number of agent pairs to run in parallel (each pair runs 2 processes). "
+            "Usernames are suffixed with -1..-N to ensure uniqueness."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -370,14 +381,6 @@ def main():
     print("METAMON SELF-PLAY BATTLE")
     print("=" * 80)
 
-    # Load models
-    model1, checkpoint1 = load_model_from_args(args, agent_num=1)
-    model2, checkpoint2 = load_model_from_args(args, agent_num=2)
-
-    # Load team set
-    print(f"\nLoading team set: {args.team_set}")
-    team_set = get_metamon_teams(args.battle_format, args.team_set)
-
     # Create trajectory save directory if needed
     if args.save_trajectories_to:
         os.makedirs(args.save_trajectories_to, exist_ok=True)
@@ -389,7 +392,8 @@ def main():
     print(f"Agent 1: {args.agent1 or args.agent1_local_path} (username: {args.username1})")
     print(f"Agent 2: {args.agent2 or args.agent2_local_path} (username: {args.username2})")
     print(f"Battle format: {args.battle_format}")
-    print(f"Battles per agent: {args.num_battles}")
+    print(f"Concurrency (pairs): {args.concurrency}")
+    print(f"Battles per agent instance: {args.num_battles}")
     print("=" * 80 + "\n")
 
     if args.sequential:
@@ -397,6 +401,12 @@ def main():
         print("Running in SEQUENTIAL mode (Agent 1 first, then Agent 2)")
         print("\nNote: Sequential mode won't generate self-play data!")
         print("The agents won't be online at the same time.\n")
+
+        # Load models and team set only for sequential mode
+        model1, checkpoint1 = load_model_from_args(args, agent_num=1)
+        model2, checkpoint2 = load_model_from_args(args, agent_num=2)
+        print(f"\nLoading team set: {args.team_set}")
+        team_set = get_metamon_teams(args.battle_format, args.team_set)
 
         result1 = run_agent_on_ladder(
             model1, checkpoint1, args.username1, args.battle_format,
@@ -416,21 +426,33 @@ def main():
         # Parallel execution using multiprocessing
         print("Running in PARALLEL mode (both agents simultaneously)")
         print(f"Agent 2 will start {args.delay_agent2} seconds after Agent 1\n")
+        print(
+            f"Launching {args.concurrency} pair(s): "
+            f"{args.username1}-[1..{args.concurrency}] vs {args.username2}-[1..{args.concurrency}]\n"
+        )
 
         # Use spawn context for clean process separation
         ctx = mp.get_context('spawn')
 
-        # Start both agents with top-level worker targets (pickleable)
-        process1 = ctx.Process(target=run_agent_worker, args=(1, args))
-        process2 = ctx.Process(target=run_agent_worker, args=(2, args))
+        processes = []
+        for i in range(args.concurrency):
+            # Clone args and assign unique usernames per pair
+            args_agent1 = copy.copy(args)
+            args_agent2 = copy.copy(args)
+            args_agent1.username1 = f"{args.username1}-{i+1}"
+            args_agent2.username2 = f"{args.username2}-{i+1}"
 
-        process1.start()
-        process2.start()
+            # Start both agents with top-level worker targets (pickleable)
+            p1 = ctx.Process(target=run_agent_worker, args=(1, args_agent1))
+            p2 = ctx.Process(target=run_agent_worker, args=(2, args_agent2))
+            p1.start()
+            p2.start()
+            processes.extend([p1, p2])
 
-        # Wait for both to complete
+        # Wait for all to complete
         print("\nWaiting for agents to complete battles...")
-        process1.join()
-        process2.join()
+        for p in processes:
+            p.join()
 
         print("\n" + "=" * 80)
         print("SELF-PLAY BATTLES COMPLETED")
@@ -444,6 +466,7 @@ def main():
             print(f"  python -m metamon.rl.train --custom_replay_dir {args.save_trajectories_to}/agent1")
             print(f"  # or mix both agents:")
             print(f"  # Combine directories first, then use --custom_replay_dir")
+            print("\nNote: Multiple parallel instances contribute to each agent directory.")
 
         results = {
             "status": "completed",
