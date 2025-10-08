@@ -1,0 +1,30 @@
+# Files and directories to exclude from Cloud Build context.
+# Having this file prevents gcloud from falling back to .gitignore rules.
+
+# VCS and local metadata
+.git
+.gitmodules
+.gcloudignore
+.dockerignore
+
+# Python bytecode and packaging artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info
+build/
+dist/
+.venv/
+.env
+
+# Large or generated assets not needed for builds
+cache/
+media/
+tokenizer/
+
+# Submodule internals we don't need in context
+server/pokemon-showdown/.git
+amago/.git
+
+# Misc
+.DS_Store

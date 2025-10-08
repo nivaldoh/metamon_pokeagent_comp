@@ -1,0 +1,24 @@
+# Ignore VCS metadata and local tooling
+.git
+.gitmodules
+.dockerignore
+
+# Build artifacts and virtual environments
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info
+build/
+dist/
+.venv/
+.env
+
+# Large or generated assets that should not be sent to the build context
+cache/
+media/
+tokenizer/
+server/pokemon-showdown/.git
+amago/.git
+
+# Misc
+.DS_Store

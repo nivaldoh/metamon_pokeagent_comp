@@ -363,7 +363,29 @@ class PokeEnvWrapper(OpenAIGymEnv):
 
     @property
     def server_configuration(self):
-        return LocalhostServerConfiguration
+        """Server configuration for local Showdown.
+
+        Defaults to localhost:8000 (poke-env's LocalhostServerConfiguration),
+        but can be overridden with environment variables:
+          - SHOWDOWN_HOST: hostname/IP to connect to (default: 127.0.0.1)
+          - SHOWDOWN_PORT: port to connect to (default: 8000)
+          - PORT: fallback when SHOWDOWN_PORT is not set (useful in containers)
+        """
+        host = os.environ.get("SHOWDOWN_HOST", "127.0.0.1")
+        port = os.environ.get("SHOWDOWN_PORT") or os.environ.get("PORT") or "8000"
+        try:
+            port_int = int(port)
+        except Exception:
+            port_int = 8000
+
+        # Use poke-env's built-in LocalhostServerConfiguration when matching defaults
+        if host in {"127.0.0.1", "localhost"} and port_int == 8000:
+            return LocalhostServerConfiguration
+
+        # Otherwise, construct a custom configuration for the given host/port
+        ws_url = f"ws://{host}:{port_int}/showdown/websocket"
+        auth_url = f"http://{host}:{port_int}/action.php?"
+        return ServerConfiguration(ws_url, auth_url)
 
     @property
     def action_space(self):

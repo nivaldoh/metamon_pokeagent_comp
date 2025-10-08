@@ -2,6 +2,9 @@ import json
 import collections
 import functools
 from typing import Optional, Dict, Any, Callable, List
+import multiprocessing as mp
+import os
+import time
 
 import metamon
 from metamon.rl.pretrained import (
@@ -76,6 +79,140 @@ def pretrained_vs_baselines(
         episodes=total_battles,
     )
     return results
+
+
+def _build_model_from_spec(spec: Dict[str, Any]):
+    """Build a pretrained model (HF or local) from a spec dict.
+
+    Spec keys:
+      - hf_name: Optional[str]
+      - local_path: Optional[str]
+      - checkpoint: Optional[int]
+      - model_gin: Optional[str]
+      - train_gin: Optional[str]
+    Returns (pretrained_model, checkpoint)
+    """
+    hf_name = spec.get("hf_name")
+    local_path = spec.get("local_path")
+    checkpoint = spec.get("checkpoint")
+
+    if hf_name is not None:
+        return get_pretrained_model(hf_name), checkpoint
+
+    if local_path is not None:
+        from metamon.rl.pretrained import LocalPretrainedModel
+        # Defaults match the example script and typical training configs.
+        model = LocalPretrainedModel(
+            amago_ckpt_dir=os.path.dirname(local_path.rstrip("/")),
+            model_name=os.path.basename(local_path.rstrip("/")),
+            model_gin_config=spec.get("model_gin"),
+            train_gin_config=spec.get("train_gin"),
+            default_checkpoint=checkpoint,
+            action_space=metamon.interface.DefaultActionSpace(),
+            observation_space=metamon.interface.ExpandedObservationSpace(),
+            tokenizer=metamon.tokenizer.get_tokenizer("DefaultObservationSpace-v1"),
+        )
+        return model, checkpoint
+
+    raise ValueError("Invalid agent spec: provide either 'hf_name' or 'local_path'")
+
+
+def _headtohead_worker(
+    spec: Dict[str, Any],
+    username: str,
+    battle_format: str,
+    team_set_name: str,
+    total_battles: int,
+    battle_backend: str,
+    save_dir: Optional[str],
+    delay: int = 0,
+):
+    if delay:
+        time.sleep(delay)
+    model, checkpoint = _build_model_from_spec(spec)
+    team_set = metamon.env.get_metamon_teams(battle_format, team_set_name)
+    # Optional agent-specific subdirectory is created by caller.
+    results = pretrained_vs_local_ladder(
+        pretrained_model=model,
+        username=username,
+        battle_format=battle_format,
+        team_set=team_set,
+        total_battles=total_battles,
+        checkpoint=checkpoint,
+        battle_backend=battle_backend,
+        save_trajectories_to=save_dir,
+        log_to_wandb=False,
+    )
+    return results
+
+
+def pretrained_vs_pretrained_headtohead(
+    agent1_spec: Dict[str, Any],
+    agent2_spec: Dict[str, Any],
+    username1: str,
+    username2: str,
+    battle_format: str,
+    team_set_name: str,
+    total_battles: int,
+    battle_backend: str = "poke-env",
+    save_trajectories_to: Optional[str] = None,
+    delay_agent2: int = 5,
+) -> Dict[str, Any]:
+    """Run two pretrained agents head-to-head on the local server concurrently.
+
+    - Preserves the saved trajectory structure by writing each agent's games under
+      save_trajectories_to/agent1 and save_trajectories_to/agent2, matching the
+      existing self-play scripts.
+    - Uses a minimal two-process orchestration to keep both agents online together.
+    """
+
+    if save_trajectories_to:
+        os.makedirs(save_trajectories_to, exist_ok=True)
+        agent1_dir = os.path.join(save_trajectories_to, "agent1")
+        agent2_dir = os.path.join(save_trajectories_to, "agent2")
+        os.makedirs(agent1_dir, exist_ok=True)
+        os.makedirs(agent2_dir, exist_ok=True)
+    else:
+        agent1_dir = None
+        agent2_dir = None
+
+    print('[DEBUG] 1')
+    ctx = mp.get_context("spawn")
+    p1 = ctx.Process(
+        target=_headtohead_worker,
+        args=(
+            agent1_spec,
+            username1,
+            battle_format,
+            team_set_name,
+            total_battles,
+            battle_backend,
+            agent1_dir,
+            0,
+        ),
+    )
+    print('[DEBUG] 2')
+    p2 = ctx.Process(
+        target=_headtohead_worker,
+        args=(
+            agent2_spec,
+            username2,
+            battle_format,
+            team_set_name,
+            total_battles,
+            battle_backend,
+            agent2_dir,
+            delay_agent2,
+        ),
+    )
+    print('[DEBUG] 3')
+    p1.start()
+    p2.start()
+    p1.join()
+    p2.join()
+    print('[DEBUG] 4')
+
+    return {"status": "completed", "note": "Per-agent results printed by workers."}
 
 
 def _pretrained_on_ladder(

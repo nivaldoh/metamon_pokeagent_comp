@@ -19,7 +19,6 @@ Example Usage:
         --battle_format gen1ou \
         --num_battles 10000 \
         --save_trajectories_to ./self_play/synrl_selfplay_data
-        -- concurrency 4
 
     # 2. Two different HF models
     python examples/self_play_battle.py \
@@ -58,167 +57,38 @@ Example Usage:
 
 import os
 import sys
-import time
-import copy
 import multiprocessing as mp
 from argparse import ArgumentParser
 from typing import Optional, Dict, Any
 
 import metamon
-from metamon.rl.pretrained import get_pretrained_model, get_pretrained_model_names
-from metamon.rl.evaluate import pretrained_vs_local_ladder
-from metamon.env import get_metamon_teams
+from metamon.rl.pretrained import get_pretrained_model_names
+from metamon.rl.evaluate import (
+    pretrained_vs_pretrained_headtohead,
+)
+ 
 
 
-def load_model_from_args(args, agent_num: int):
-    """
-    Load a model based on command line arguments.
+ 
 
-    Args:
-        args: Parsed command line arguments
-        agent_num: 1 or 2, indicating which agent to load
 
-    Returns:
-        PretrainedModel instance (HF or local)
-    """
+def _agent_spec_from_args(args, agent_num: int) -> Dict[str, Any]:
     if agent_num == 1:
-        agent_name = args.agent1
-        local_path = args.agent1_local_path
-        checkpoint = args.agent1_checkpoint
-        model_gin = args.agent1_model_gin
-        train_gin = args.agent1_train_gin
+        return {
+            "hf_name": args.agent1,
+            "local_path": args.agent1_local_path,
+            "checkpoint": args.agent1_checkpoint,
+            "model_gin": args.agent1_model_gin,
+            "train_gin": args.agent1_train_gin,
+        }
     else:
-        agent_name = args.agent2
-        local_path = args.agent2_local_path
-        checkpoint = args.agent2_checkpoint
-        model_gin = args.agent2_model_gin
-        train_gin = args.agent2_train_gin
-
-    # Load from HuggingFace
-    if agent_name is not None:
-        print(f"Loading Agent {agent_num} from HuggingFace: {agent_name}")
-        return get_pretrained_model(agent_name), checkpoint
-
-    # Load from local path
-    elif local_path is not None:
-        from metamon.rl.pretrained import LocalPretrainedModel
-
-        print(f"Loading Agent {agent_num} from local path: {local_path}")
-
-        if model_gin is None or train_gin is None:
-            raise ValueError(
-                f"When using local models, must specify both --agent{agent_num}_model_gin "
-                f"and --agent{agent_num}_train_gin"
-            )
-
-        # Determine model name from path
-        model_name = os.path.basename(local_path.rstrip('/'))
-
-        # Create LocalPretrainedModel
-        # Note: This requires knowing the obs/action spaces used during training
-        # We'll use defaults, but users may need to customize this
-        model = LocalPretrainedModel(
-            amago_ckpt_dir=os.path.dirname(local_path),
-            model_name=model_name,
-            model_gin_config=model_gin,
-            train_gin_config=train_gin,
-            default_checkpoint=checkpoint,
-            # These should match what was used during training
-            # Users can modify the script if they used custom spaces
-            action_space=metamon.interface.DefaultActionSpace(),
-            observation_space=metamon.interface.ExpandedObservationSpace(),
-            tokenizer=metamon.tokenizer.get_tokenizer("DefaultObservationSpace-v1"),
-        )
-        return model, checkpoint
-
-    else:
-        raise ValueError(f"Must specify either --agent{agent_num} or --agent{agent_num}_local_path")
-
-
-def run_agent_on_ladder(
-    model,
-    checkpoint: Optional[int],
-    username: str,
-    battle_format: str,
-    team_set,
-    num_battles: int,
-    battle_backend: str,
-    save_trajectories_to: Optional[str],
-    agent_id: int,
-) -> Dict[str, Any]:
-    """
-    Run a single agent on the local ladder.
-
-    This function is designed to run in a separate process.
-    """
-    print(f"\n[Agent {agent_id}] Starting with username: {username}")
-    print(f"[Agent {agent_id}] Battle format: {battle_format}")
-    print(f"[Agent {agent_id}] Number of battles: {num_battles}")
-
-    # Set up trajectory saving path for this agent
-    if save_trajectories_to:
-        agent_traj_path = os.path.join(save_trajectories_to, f"agent{agent_id}")
-        os.makedirs(agent_traj_path, exist_ok=True)
-        print(f"[Agent {agent_id}] Saving trajectories to: {agent_traj_path}")
-    else:
-        agent_traj_path = None
-
-    try:
-        # Run the agent on the ladder
-        results = pretrained_vs_local_ladder(
-            pretrained_model=model,
-            username=username,
-            battle_format=battle_format,
-            team_set=team_set,
-            total_battles=num_battles,
-            checkpoint=checkpoint,
-            battle_backend=battle_backend,
-            save_trajectories_to=agent_traj_path,
-            log_to_wandb=False,
-        )
-
-        print(f"\n[Agent {agent_id}] Completed battles!")
-        print(f"[Agent {agent_id}] Results: {results}")
-
-        return results
-
-    except Exception as e:
-        print(f"\n[Agent {agent_id}] ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}
-
-
-def run_agent_worker(agent_num: int, args) -> Dict[str, Any]:
-    """
-    Top-level worker entrypoint for multiprocessing.
-
-    Reconstructs the model and team set inside the child process to avoid
-    pickling issues from the 'spawn' start method.
-    """
-    # Optional stagger for agent 2 to ensure both are online together.
-    if getattr(args, "delay_agent2", 0) and agent_num == 2:
-        time.sleep(args.delay_agent2)
-
-    # Build model/checkpoint inside the worker
-    model, checkpoint = load_model_from_args(args, agent_num=agent_num)
-
-    # Build team set inside the worker
-    team_set = get_metamon_teams(args.battle_format, args.team_set)
-
-    username = args.username1 if agent_num == 1 else args.username2
-
-    return run_agent_on_ladder(
-        model=model,
-        checkpoint=checkpoint,
-        username=username,
-        battle_format=args.battle_format,
-        team_set=team_set,
-        num_battles=args.num_battles,
-        battle_backend=args.battle_backend,
-        save_trajectories_to=args.save_trajectories_to,
-        agent_id=agent_num,
-    )
+        return {
+            "hf_name": args.agent2,
+            "local_path": args.agent2_local_path,
+            "checkpoint": args.agent2_checkpoint,
+            "model_gin": args.agent2_model_gin,
+            "train_gin": args.agent2_train_gin,
+        }
 
 
 def main():
@@ -339,26 +209,12 @@ def main():
         help="Username for Agent 2 on the ladder",
     )
 
-    # Execution options
-    parser.add_argument(
-        "--sequential",
-        action="store_true",
-        help="Run agents sequentially instead of in parallel (useful for debugging)",
-    )
+    # Execution options (keep a small delay to help pairing)
     parser.add_argument(
         "--delay_agent2",
         type=int,
         default=5,
         help="Seconds to delay before starting Agent 2 (helps ensure Agent 1 is ready)",
-    )
-    parser.add_argument(
-        "--concurrency",
-        type=int,
-        default=1,
-        help=(
-            "Number of agent pairs to run in parallel (each pair runs 2 processes). "
-            "Usernames are suffixed with -1..-N to ensure uniqueness."
-        ),
     )
 
     args = parser.parse_args()
@@ -392,86 +248,40 @@ def main():
     print(f"Agent 1: {args.agent1 or args.agent1_local_path} (username: {args.username1})")
     print(f"Agent 2: {args.agent2 or args.agent2_local_path} (username: {args.username2})")
     print(f"Battle format: {args.battle_format}")
-    print(f"Concurrency (pairs): {args.concurrency}")
-    print(f"Battles per agent instance: {args.num_battles}")
+    print(f"Battles per agent: {args.num_battles}")
     print("=" * 80 + "\n")
 
-    if args.sequential:
-        # Sequential execution (mainly for debugging)
-        print("Running in SEQUENTIAL mode (Agent 1 first, then Agent 2)")
-        print("\nNote: Sequential mode won't generate self-play data!")
-        print("The agents won't be online at the same time.\n")
+    # Always run exactly two agents simultaneously via evaluation helper
+    print("Running two agents head-to-head (direct orchestration)")
+    print(f"Agent 2 will start {args.delay_agent2} seconds after Agent 1\n")
 
-        # Load models and team set only for sequential mode
-        model1, checkpoint1 = load_model_from_args(args, agent_num=1)
-        model2, checkpoint2 = load_model_from_args(args, agent_num=2)
-        print(f"\nLoading team set: {args.team_set}")
-        team_set = get_metamon_teams(args.battle_format, args.team_set)
+    spec1 = _agent_spec_from_args(args, 1)
+    spec2 = _agent_spec_from_args(args, 2)
+    results = pretrained_vs_pretrained_headtohead(
+        agent1_spec=spec1,
+        agent2_spec=spec2,
+        username1=args.username1,
+        username2=args.username2,
+        battle_format=args.battle_format,
+        team_set_name=args.team_set,
+        total_battles=args.num_battles,
+        battle_backend=args.battle_backend,
+        save_trajectories_to=args.save_trajectories_to,
+        delay_agent2=args.delay_agent2,
+    )
 
-        result1 = run_agent_on_ladder(
-            model1, checkpoint1, args.username1, args.battle_format,
-            team_set, args.num_battles, args.battle_backend,
-            args.save_trajectories_to, agent_id=1
-        )
+    print("\n" + "=" * 80)
+    print("SELF-PLAY BATTLES COMPLETED")
+    print("=" * 80)
 
-        result2 = run_agent_on_ladder(
-            model2, checkpoint2, args.username2, args.battle_format,
-            team_set, args.num_battles, args.battle_backend,
-            args.save_trajectories_to, agent_id=2
-        )
-
-        results = {"agent1": result1, "agent2": result2}
-
-    else:
-        # Parallel execution using multiprocessing
-        print("Running in PARALLEL mode (both agents simultaneously)")
-        print(f"Agent 2 will start {args.delay_agent2} seconds after Agent 1\n")
-        print(
-            f"Launching {args.concurrency} pair(s): "
-            f"{args.username1}-[1..{args.concurrency}] vs {args.username2}-[1..{args.concurrency}]\n"
-        )
-
-        # Use spawn context for clean process separation
-        ctx = mp.get_context('spawn')
-
-        processes = []
-        for i in range(args.concurrency):
-            # Clone args and assign unique usernames per pair
-            args_agent1 = copy.copy(args)
-            args_agent2 = copy.copy(args)
-            args_agent1.username1 = f"{args.username1}-{i+1}"
-            args_agent2.username2 = f"{args.username2}-{i+1}"
-
-            # Start both agents with top-level worker targets (pickleable)
-            p1 = ctx.Process(target=run_agent_worker, args=(1, args_agent1))
-            p2 = ctx.Process(target=run_agent_worker, args=(2, args_agent2))
-            p1.start()
-            p2.start()
-            processes.extend([p1, p2])
-
-        # Wait for all to complete
-        print("\nWaiting for agents to complete battles...")
-        for p in processes:
-            p.join()
-
-        print("\n" + "=" * 80)
-        print("SELF-PLAY BATTLES COMPLETED")
-        print("=" * 80)
-
-        if args.save_trajectories_to:
-            print(f"\nTrajectories saved to:")
-            print(f"  Agent 1: {args.save_trajectories_to}/agent1/{args.battle_format}/")
-            print(f"  Agent 2: {args.save_trajectories_to}/agent2/{args.battle_format}/")
-            print("\nYou can use this data for training with:")
-            print(f"  python -m metamon.rl.train --custom_replay_dir {args.save_trajectories_to}/agent1")
-            print(f"  # or mix both agents:")
-            print(f"  # Combine directories first, then use --custom_replay_dir")
-            print("\nNote: Multiple parallel instances contribute to each agent directory.")
-
-        results = {
-            "status": "completed",
-            "note": "Results are printed above by each agent process"
-        }
+    if args.save_trajectories_to:
+        print(f"\nTrajectories saved to:")
+        print(f"  Agent 1: {args.save_trajectories_to}/agent1/{args.battle_format}/")
+        print(f"  Agent 2: {args.save_trajectories_to}/agent2/{args.battle_format}/")
+        print("\nYou can use this data for training with:")
+        print(f"  python -m metamon.rl.train --custom_replay_dir {args.save_trajectories_to}/agent1")
+        print(f"  # or mix both agents:")
+        print(f"  # Combine directories first, then use --custom_replay_dir")
 
     print("\nDone!")
     return results

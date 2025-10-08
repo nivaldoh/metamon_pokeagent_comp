@@ -88,8 +88,7 @@ if __name__ == "__main__":
     parser.add_argument("--team_split", type=str, default="paper_replays")
     parser.add_argument("--player", required=True)
     parser.add_argument("--opponent", required=True)
-    parser.add_argument("--battles", type=int, default=10)
-    parser.add_argument("--concurrent", type=int, default=10)
+    parser.add_argument("--battles", type=int, default=100)
     args = parser.parse_args()
     result = head2head(
         player_name=args.player,

@@ -1,0 +1,50 @@
+# Cloud Build config to build and push the Metamon self-play worker image
+# Usage:
+# gcloud builds submit \
+#   --config cloudbuild.yaml \
+#   --substitutions=_REGION=us-central1,_REPO=metamon,_IMAGE=metamon-sp,_TAG=cpu,_TORCH_VERSION=2.5.1,_AMAGO_REF=main
+
+substitutions:
+  _REGION: us-central1
+  _REPO: metamon
+  _IMAGE: metamon-sp
+  _TAG: cpu
+  _TORCH_VERSION: "2.6"
+  _AMAGO_REF: "main"
+  _AMAGO_REPO_URL: "https://github.com/UT-Austin-RPL/amago"
+  _METAMON_REPO_URL: "https://github.com/nivaldoh/metamon.git"
+  _METAMON_REF: "main"
+  _DOCKERFILE: Dockerfile
+  _CONTEXT: .
+
+steps:
+  - id: Build image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - ${_DOCKERFILE}
+      - --build-arg
+      - TORCH_VERSION=${_TORCH_VERSION}
+      - --build-arg
+      - AMAGO_REF=${_AMAGO_REF}
+      - --build-arg
+      - AMAGO_REPO_URL=${_AMAGO_REPO_URL}
+      - --build-arg
+      - METAMON_REF=${_METAMON_REF}
+      - --build-arg
+      - METAMON_REPO_URL=${_METAMON_REPO_URL}
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${_TAG}
+      - ${_CONTEXT}
+
+  - id: Push image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${_TAG}
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${_TAG}
+
+timeout: 86400s

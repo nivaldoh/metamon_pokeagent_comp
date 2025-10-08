@@ -7,15 +7,13 @@ name = "metamon"
 version = "1.4.0"
 description = "Baselines and Datasets for Pokémon Showdown RL"
 readme = { file = "README.md", content-type = "text/markdown" }
-authors = [
-  { name = "Jake Grigsby", email = "grigsby@cs.utexas.edu" }
-]
-license = "MIT"
-license-files = ["LICENSE"]
+authors = [{ name = "Jake Grigsby", email = "grigsby@cs.utexas.edu" }]
+license = { text = "MIT" }  # PEP 621 table form
 requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Topic :: Games/Entertainment",
@@ -40,6 +38,5 @@ dependencies = [
 Homepage = "https://metamon.tech"
 Repository = "https://github.com/UT-Austin-RPL/metamon"
 
-[tool.setuptools]
-packages = ["metamon"]
-
+[tool.setuptools.packages.find]
+include = ["metamon*"]
