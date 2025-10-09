@@ -36,6 +36,45 @@ AGENT2_MODEL_GIN="${AGENT2_MODEL_GIN:-}"
 AGENT2_TRAIN_GIN="${AGENT2_TRAIN_GIN:-}"
 SEQUENTIAL="${SEQUENTIAL:-}"
 
+# Optional: manifest-driven config (one JSON per task) via filename in manifests dir
+if [[ -n "${JSONL_TASK_MANIFEST:-}" ]]; then
+  : "${MANIFESTS_DIR:=manifests}"
+  PARAMS_FILE="${MANIFESTS_DIR%/}/${JSONL_TASK_MANIFEST}"
+  if [[ ! -r "${PARAMS_FILE}" ]]; then
+    echo "Manifest file not found or unreadable: ${PARAMS_FILE}" >&2
+    echo "Check MANIFESTS_DIR (${MANIFESTS_DIR}) and JSONL_TASK_MANIFEST (${JSONL_TASK_MANIFEST})" >&2
+    exit 2
+  fi
+  LINE_NO=$(( ${CLOUD_RUN_TASK_INDEX:-0} + 1 ))
+  LINE=$(sed -n "${LINE_NO}p" "${PARAMS_FILE}")
+  if [[ -z "${LINE}" ]]; then
+    echo "No JSON found at line ${LINE_NO} in ${PARAMS_FILE}" >&2
+    exit 3
+  fi
+  echo "Using manifest: ${PARAMS_FILE} (task index: ${CLOUD_RUN_TASK_INDEX:-0}, line: ${LINE_NO})"
+
+  TMP_JSON=$(mktemp)
+  printf '%s\n' "${LINE}" > "${TMP_JSON}"
+  TMP_EXPORTS=$(mktemp)
+  python -c 'import sys,json,shlex; cfg=json.load(open(sys.argv[1]));
+for src,dst in (("agent1","AGENT1"),("agent2","AGENT2"),("battle_format","BATTLE_FORMAT"),("team_set","TEAM_SET"),("num_battles","NUM_BATTLES"),("cfg_tag","CFG_TAG")):
+    v=cfg.get(src);
+    if v is not None:
+        print(f"{dst}={shlex.quote(str(v))}")' "${TMP_JSON}" > "${TMP_EXPORTS}"
+  set -a
+  # shellcheck disable=SC1090
+  . "${TMP_EXPORTS}"
+  set +a
+  rm -f "${TMP_EXPORTS}" "${TMP_JSON}"
+
+  # Build SAVE_TRAJECTORIES_TO using cfg_tag + run id and per-task suffix
+  : "${RUN_ID:=$(date -u +%Y%m%d-%H%M%S)}"
+  : "${CFG_TAG:=${BATTLE_FORMAT}_${AGENT1}_${AGENT2}_${TEAM_SET}}"
+  # Output base: default to mounted /selfplay unless overridden
+  : "${OUTPUT_BASE:=/selfplay}"
+  SAVE_TRAJECTORIES_TO="${OUTPUT_BASE%/}/run=${RUN_ID}/cfg=${CFG_TAG}/task-${CLOUD_RUN_TASK_INDEX:-0}"
+fi
+
 # Build command arguments from environment variables
 CMD_ARGS=()
 

@@ -209,6 +209,48 @@ Self-play battles can run for a long time. Set appropriate timeouts:
 
 ## Advanced Usage
 
+### Cloud Run Jobs: Manifest-Driven Tasks
+
+Provide a JSON Lines manifest under the repository's `manifests/` directory and set `JSONL_TASK_MANIFEST` to the filename. The job task at index `CLOUD_RUN_TASK_INDEX` (0-based) reads the corresponding line and exports parameters to env vars.
+
+Example manifest (`params.jsonl`):
+
+```
+{"battle_format":"gen1ou","agent1":"SyntheticRLV1","agent2":"SyntheticRLV2","team_set":"competitive","num_battles":100,"cfg_tag":"gen1ou_SyntheticRLV1_SyntheticRLV2_competitive"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV1","agent2":"SyntheticRLV2","team_set":"competitive","num_battles":100,"cfg_tag":"gen1ou_SyntheticRLV1_SyntheticRLV2_competitive"}
+{"battle_format":"gen9ou","agent1":"Abra","agent2":"Abra","team_set":"modern_replays","num_battles":50,"cfg_tag":"gen9ou_Abra_Abra_modern_replays"}
+```
+
+Supported keys map to env vars used by the runner:
+- `agent1` → `AGENT1`
+- `agent2` → `AGENT2`
+- `battle_format` → `BATTLE_FORMAT`
+- `team_set` → `TEAM_SET`
+- `num_battles` → `NUM_BATTLES`
+- `cfg_tag` → `CFG_TAG` (optional; defaults to `<format>_<agent1>_<agent2>_<team_set>`)
+
+Output directory: when `JSONL_TASK_MANIFEST` is set, `run_self_play.sh` constructs a per-task save path automatically using a UTC run id and config tag. The base path is controlled by `OUTPUT_BASE` (defaults to `/selfplay`):
+
+```
+<OUTPUT_BASE>/run=<RUN_ID>/cfg=<CFG_TAG>/task-<CLOUD_RUN_TASK_INDEX>
+```
+
+Override `OUTPUT_BASE`, `RUN_ID`, or `CFG_TAG` via env vars if you want stable naming.
+
+Minimal Cloud Run Job example:
+
+```
+gcloud run jobs create metamon-selfplay-job \
+  --image ${IMAGE_URL} \
+  --region ${REGION} \
+  --tasks 3 \
+  --set-env-vars JSONL_TASK_MANIFEST=selfplay_rlv2.jsonl \
+  --set-secrets HF_TOKEN=huggingface-token:latest \
+  --args=run-self-play
+
+# Ensure your image includes `manifests/selfplay_rlv2.jsonl` at build time, or set `MANIFESTS_DIR` to point elsewhere in the container.
+```
+
 ### Saving Trajectories to Cloud Storage
 
 ```bash

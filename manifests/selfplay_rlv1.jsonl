@@ -1,0 +1,10 @@
+{"battle_format":"gen1ou","agent1":"SyntheticRLV1","agent2":"SyntheticRLV2","team_set":"competitive","num_battles":6000,"cfg_tag":"gen1ou_SyntheticRLV1_SyntheticRLV2_competitive"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV2","agent2":"SyntheticRLV1","team_set":"competitive","num_battles":6000,"cfg_tag":"gen1ou_SyntheticRLV2_SyntheticRLV1_competitive"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV1","agent2":"SyntheticRLV2","team_set":"modern_replays","num_battles":6000,"cfg_tag":"gen1ou_SyntheticRLV1_SyntheticRLV2_modern_replays"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV2","agent2":"SyntheticRLV1","team_set":"modern_replays","num_battles":6000,"cfg_tag":"gen1ou_SyntheticRLV2_SyntheticRLV1_modern_replays"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV1","agent2":"SyntheticRLV2","team_set":"modern_replays_v2","num_battles":6000,"cfg_tag":"gen1ou_SyntheticRLV1_SyntheticRLV2_modern_replays_v2"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV2","agent2":"SyntheticRLV1","team_set":"modern_replays_v2","num_battles":6000,"cfg_tag":"gen1ou_SyntheticRLV2_SyntheticRLV1_modern_replays_v2"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV1","agent2":"SyntheticRLV2","team_set":"paper_replays","num_battles":6000,"cfg_tag":"gen1ou_SyntheticRLV1_SyntheticRLV2_paper_replays"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV2","agent2":"SyntheticRLV1","team_set":"paper_replays","num_battles":6000,"cfg_tag":"gen1ou_SyntheticRLV2_SyntheticRLV1_paper_replays"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV1","agent2":"SyntheticRLV2","team_set":"paper_variety","num_battles":6000,"cfg_tag":"gen1ou_SyntheticRLV1_SyntheticRLV2_paper_variety"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV2","agent2":"SyntheticRLV1","team_set":"paper_variety","num_battles":6000,"cfg_tag":"gen1ou_SyntheticRLV2_SyntheticRLV1_paper_variety"}

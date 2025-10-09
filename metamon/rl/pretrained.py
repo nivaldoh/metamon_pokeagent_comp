@@ -205,7 +205,15 @@ class PretrainedModel:
             action_space=self.action_space,
         )
         # starting the experiment will build the initial model
+        print(
+            f"[DEBUG] initialize_agent: starting experiment.start() model={self.model_name} ckpt={checkpoint}",
+            flush=True,
+        )
         experiment.start()
+        print(
+            f"[DEBUG] initialize_agent: experiment.start() complete model={self.model_name}",
+            flush=True,
+        )
         if checkpoint > 0:
             # replace the weights with the pretrained checkpoint
             experiment.load_checkpoint_from_path(ckpt_path, is_accelerate_state=False)

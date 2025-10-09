@@ -127,23 +127,40 @@ def _headtohead_worker(
     save_dir: Optional[str],
     delay: int = 0,
 ):
-    if delay:
-        time.sleep(delay)
-    model, checkpoint = _build_model_from_spec(spec)
-    team_set = metamon.env.get_metamon_teams(battle_format, team_set_name)
-    # Optional agent-specific subdirectory is created by caller.
-    results = pretrained_vs_local_ladder(
-        pretrained_model=model,
-        username=username,
-        battle_format=battle_format,
-        team_set=team_set,
-        total_battles=total_battles,
-        checkpoint=checkpoint,
-        battle_backend=battle_backend,
-        save_trajectories_to=save_dir,
-        log_to_wandb=False,
-    )
-    return results
+    try:
+        print(
+            f"[DEBUG] worker: starting username={username} format={battle_format} total_battles={total_battles} backend={battle_backend} delay={delay}",
+            flush=True,
+        )
+        if delay:
+            time.sleep(delay)
+        print(f"[DEBUG] worker: building model for username={username}", flush=True)
+        model, checkpoint = _build_model_from_spec(spec)
+        print(
+            f"[DEBUG] worker: model built username={username} checkpoint={checkpoint}",
+            flush=True,
+        )
+        team_set = metamon.env.get_metamon_teams(battle_format, team_set_name)
+        print(f"[DEBUG] worker: team_set ready set_name={team_set_name}", flush=True)
+        # Optional agent-specific subdirectory is created by caller.
+        results = pretrained_vs_local_ladder(
+            pretrained_model=model,
+            username=username,
+            battle_format=battle_format,
+            team_set=team_set,
+            total_battles=total_battles,
+            checkpoint=checkpoint,
+            battle_backend=battle_backend,
+            save_trajectories_to=save_dir,
+            log_to_wandb=False,
+        )
+        print(f"[DEBUG] worker: finished laddering username={username}", flush=True)
+        return results
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] worker: exception for username={username}: {e}", flush=True)
+        traceback.print_exc()
+        return {"status": "error", "username": username, "error": str(e)}
 
 
 def pretrained_vs_pretrained_headtohead(
@@ -210,7 +227,11 @@ def pretrained_vs_pretrained_headtohead(
     p2.start()
     p1.join()
     p2.join()
-    print('[DEBUG] 4')
+    print('[DEBUG] 4', flush=True)
+    try:
+        print(f"[DEBUG] worker exitcodes: p1={p1.exitcode} p2={p2.exitcode}", flush=True)
+    except Exception:
+        pass
 
     return {"status": "completed", "note": "Per-agent results printed by workers."}
 
@@ -224,13 +245,34 @@ def _pretrained_on_ladder(
     **ladder_kwargs,
 ) -> Dict[str, Any]:
     """Helper function for ladder-based evaluation."""
-    agent = pretrained_model.initialize_agent(checkpoint=checkpoint, log=log_to_wandb)
+    import os as _os
+    print(
+        f"[DEBUG] ladder: BEGIN username={ladder_kwargs.get('player_username')} format={ladder_kwargs.get('battle_format')} "
+        f"episodes={total_battles} host={_os.environ.get('SHOWDOWN_HOST','127.0.0.1')} "
+        f"port={_os.environ.get('SHOWDOWN_PORT') or _os.environ.get('PORT') or '8000'}",
+        flush=True,
+    )
+    agent = None
+    try:
+        agent = pretrained_model.initialize_agent(checkpoint=checkpoint, log=log_to_wandb)
+        print("[DEBUG] ladder: agent initialized", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] ladder: initialize_agent failed: {e}", flush=True)
+        traceback.print_exc()
+        raise
     agent.env_mode = "sync"
     agent.parallel_actors = 1
     agent.verbose = False  # turn off tqdm progress bar and print poke-env battle status
 
+    def _debug_make_env(*args, **kwargs):
+        print("[DEBUG] ladder: invoking make_ladder env factory", flush=True)
+        env = make_ladder(*args, **kwargs)
+        print("[DEBUG] ladder: env factory returned", flush=True)
+        return env
+
     make_env = functools.partial(
-        make_ladder,
+        _debug_make_env,
         observation_space=pretrained_model.observation_space,
         action_space=pretrained_model.action_space,
         reward_function=pretrained_model.reward_function,
@@ -238,11 +280,23 @@ def _pretrained_on_ladder(
         **ladder_kwargs,
     )
 
-    results = agent.evaluate_test(
-        [make_env],
-        timesteps=total_battles * 1000,
-        episodes=total_battles,
-    )
+    try:
+        results = agent.evaluate_test(
+            [make_env],
+            timesteps=total_battles * 1000,
+            episodes=total_battles,
+        )
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] ladder: evaluate_test failed: {e}", flush=True)
+        traceback.print_exc()
+        raise
+    try:
+        import json as _json
+        print("[DEBUG] ladder: results ready", flush=True)
+        print(_json.dumps(results)[:256], flush=True)
+    except Exception:
+        print("[DEBUG] ladder: results (non-serializable)", flush=True)
     return results
 
 

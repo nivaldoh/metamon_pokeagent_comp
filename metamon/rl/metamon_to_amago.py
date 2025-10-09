@@ -93,7 +93,12 @@ def make_local_ladder_env(*args, **kwargs):
     """
     _block_warnings()
     menv = QueueOnLocalLadder(*args, **kwargs)
-    print("Made Local Ladder Env")
+    try:
+        sc = menv.server_configuration
+        ws = getattr(sc, 'ws_url', None)
+        print(f"Made Local Ladder Env (ws={ws or 'LocalhostServerConfiguration'})", flush=True)
+    except Exception:
+        print("Made Local Ladder Env", flush=True)
     return PSLadderAMAGOWrapper(menv)
 
 
@@ -146,6 +151,10 @@ def make_placeholder_experiment(
     )
     dummy_dset = amago.loading.DoNothingDataset()
     dummy_env = lambda: penv
+    print(
+        f"[DEBUG] make_placeholder_experiment: ckpt_base_dir={ckpt_base_dir} run_name={run_name}",
+        flush=True,
+    )
     experiment = MetamonAMAGOExperiment(
         # assumes that positional args
         # agent_type, tstep_encoder_type,
@@ -178,6 +187,10 @@ def make_placeholder_experiment(
         wandb_project=os.environ.get("METAMON_WANDB_PROJECT"),
         wandb_entity=os.environ.get("METAMON_WANDB_ENTITY"),
         verbose=True,
+    )
+    print(
+        f"[DEBUG] make_placeholder_experiment: experiment constructed env_mode=sync parallel_actors=1",
+        flush=True,
     )
     return experiment
 
@@ -391,6 +404,7 @@ class PSLadderAMAGOWrapper(MetamonAMAGOWrapper):
             return self.placeholder_obs, {}
         obs, info = self.env.reset(*args, **kwargs)
         self.battle_counter += 1
+        print(f"[DEBUG] PSLadderAMAGOWrapper.inner_reset: battle_counter={self.battle_counter}/{self.env.num_battles}")
         if self.placeholder_obs is None:
             self.placeholder_obs = obs
         # move legal action from info to obs
@@ -647,88 +661,88 @@ class MetamonAMAGOExperiment(amago.Experiment):
 
     def start(self):
         """Override start to add detailed debug logging"""
-        print("[DEBUG] MetamonAMAGOExperiment.start() called")
+        print("[DEBUG] MetamonAMAGOExperiment.start() called", flush=True)
 
-        print("[DEBUG] Initializing datasets...")
+        print("[DEBUG] Initializing datasets...", flush=True)
         self.init_dsets()
-        print("[DEBUG] Datasets initialized successfully")
+        print("[DEBUG] Datasets initialized successfully", flush=True)
 
-        print("[DEBUG] Initializing environments...")
+        print("[DEBUG] Initializing environments...", flush=True)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             warnings.filterwarnings("always", category=amago.utils.AmagoWarning)
             env_summary = self.init_envs()
-        print("[DEBUG] Environments initialized successfully")
+        print("[DEBUG] Environments initialized successfully", flush=True)
 
-        print("[DEBUG] Initializing dataloaders...")
+        print("[DEBUG] Initializing dataloaders...", flush=True)
         self.init_dloaders()
-        print("[DEBUG] Dataloaders initialized successfully")
+        print("[DEBUG] Dataloaders initialized successfully", flush=True)
 
-        print("[DEBUG] Initializing model...")
+        print("[DEBUG] Initializing model...", flush=True)
         self.init_model()
-        print("[DEBUG] Model initialized successfully")
+        print("[DEBUG] Model initialized successfully", flush=True)
 
-        print("[DEBUG] Initializing checkpoints...")
+        print("[DEBUG] Initializing checkpoints...", flush=True)
         self.init_checkpoints()
-        print("[DEBUG] Checkpoints initialized successfully")
+        print("[DEBUG] Checkpoints initialized successfully", flush=True)
 
-        print("[DEBUG] Initializing logger...")
+        print("[DEBUG] Initializing logger...", flush=True)
         self.init_logger()
-        print("[DEBUG] Logger initialized successfully")
+        print("[DEBUG] Logger initialized successfully", flush=True)
 
         if self.verbose:
-            print("[DEBUG] Printing summary...")
+            print("[DEBUG] Printing summary...", flush=True)
             self.summary(env_summary=env_summary)
-            print("[DEBUG] Summary printed")
+            print("[DEBUG] Summary printed", flush=True)
 
-        print("[DEBUG] MetamonAMAGOExperiment.start() completed")
+        print("[DEBUG] MetamonAMAGOExperiment.start() completed", flush=True)
 
     def init_envs(self):
-        print("[DEBUG] MetamonAMAGOExperiment.init_envs() called")
-        print(f"[DEBUG] parallel_actors: {self.parallel_actors}")
-        print(f"[DEBUG] env_mode: {self.env_mode}")
-        print(f"[DEBUG] async_env_mp_context: {self.async_env_mp_context}")
+        print("[DEBUG] MetamonAMAGOExperiment.init_envs() called", flush=True)
+        print(f"[DEBUG] parallel_actors: {self.parallel_actors}", flush=True)
+        print(f"[DEBUG] env_mode: {self.env_mode}", flush=True)
+        print(f"[DEBUG] async_env_mp_context: {self.async_env_mp_context}", flush=True)
 
         # Check what environments we're trying to create
-        print(f"[DEBUG] make_val_env type: {type(self.make_val_env)}")
+        print(f"[DEBUG] make_val_env type: {type(self.make_val_env)}", flush=True)
         if isinstance(self.make_val_env, list):
-            print(f"[DEBUG] Number of validation environments: {len(self.make_val_env)}")
+            print(f"[DEBUG] Number of validation environments: {len(self.make_val_env)}", flush=True)
 
-        print("[DEBUG] Calling super().init_envs()...")
+        print("[DEBUG] Calling super().init_envs()...", flush=True)
         if self.env_mode == "sync":
-            print("[DEBUG] Using sync mode (DummyAsyncVectorEnv)")
+            print("[DEBUG] Using sync mode (DummyAsyncVectorEnv)", flush=True)
         else:
-            print("[DEBUG] Using async mode (AsyncVectorEnv with multiprocessing)")
+            print("[DEBUG] Using async mode (AsyncVectorEnv with multiprocessing)", flush=True)
 
         try:
             out = super().init_envs()
-            print("[DEBUG] super().init_envs() completed")
+            print("[DEBUG] super().init_envs() completed", flush=True)
         except Exception as e:
-            print(f"[DEBUG ERROR] Failed in super().init_envs(): {e}")
+            print(f"[DEBUG ERROR] Failed in super().init_envs(): {e}", flush=True)
             import traceback
             traceback.print_exc()
             raise
 
         # Call take_long_break on validation environments
         # With lazy initialization, this is now safe in both async and sync modes
-        print("[DEBUG] Calling take_long_break on validation environments...")
+        print("[DEBUG] Calling take_long_break on validation environments...", flush=True)
         amago.utils.call_async_env(self.val_envs, "take_long_break")
-        print("[DEBUG] take_long_break completed")
+        print("[DEBUG] take_long_break completed", flush=True)
 
         return out
 
     def init_model(self):
-        print("[DEBUG] MetamonAMAGOExperiment.init_model() called")
-        print(f"[DEBUG] Agent type: {self.agent_type}")
-        print(f"[DEBUG] Tstep encoder type: {self.tstep_encoder_type}")
-        print(f"[DEBUG] Trajectory encoder type: {self.traj_encoder_type}")
+        print("[DEBUG] MetamonAMAGOExperiment.init_model() called", flush=True)
+        print(f"[DEBUG] Agent type: {self.agent_type}", flush=True)
+        print(f"[DEBUG] Tstep encoder type: {self.tstep_encoder_type}", flush=True)
+        print(f"[DEBUG] Trajectory encoder type: {self.traj_encoder_type}", flush=True)
 
         try:
-            print("[DEBUG] Calling super().init_model()...")
+            print("[DEBUG] Calling super().init_model()...", flush=True)
             super().init_model()
-            print("[DEBUG] super().init_model() completed successfully")
+            print("[DEBUG] super().init_model() completed successfully", flush=True)
         except Exception as e:
-            print(f"[DEBUG ERROR] Failed during model initialization: {e}")
+            print(f"[DEBUG ERROR] Failed during model initialization: {e}", flush=True)
             import traceback
             traceback.print_exc()
             raise
@@ -760,21 +774,21 @@ class MetamonAMAGOExperiment(amago.Experiment):
                 self.compile_model = False
 
     def init_dsets(self):
-        print("[DEBUG] MetamonAMAGOExperiment.init_dsets() called")
-        print(f"[DEBUG] Dataset type: {type(self.dataset).__name__}")
+        print("[DEBUG] MetamonAMAGOExperiment.init_dsets() called", flush=True)
+        print(f"[DEBUG] Dataset type: {type(self.dataset).__name__}", flush=True)
 
-        print("[DEBUG] Calling super().init_dsets()...")
+        print("[DEBUG] Calling super().init_dsets()...", flush=True)
         super().init_dsets()
-        print("[DEBUG] super().init_dsets() completed")
+        print("[DEBUG] super().init_dsets() completed", flush=True)
 
     def init_dloaders(self):
-        print("[DEBUG] MetamonAMAGOExperiment.init_dloaders() called")
-        print(f"[DEBUG] Batch size: {self.batch_size}")
-        print(f"[DEBUG] Dataloader workers: {self.dloader_workers}")
+        print("[DEBUG] MetamonAMAGOExperiment.init_dloaders() called", flush=True)
+        print(f"[DEBUG] Batch size: {self.batch_size}", flush=True)
+        print(f"[DEBUG] Dataloader workers: {self.dloader_workers}", flush=True)
 
-        print("[DEBUG] Calling super().init_dloaders()...")
+        print("[DEBUG] Calling super().init_dloaders()...", flush=True)
         super().init_dloaders()
-        print("[DEBUG] super().init_dloaders() completed")
+        print("[DEBUG] super().init_dloaders() completed", flush=True)
 
     def evaluate_val(self):
         # Resume from break before evaluation

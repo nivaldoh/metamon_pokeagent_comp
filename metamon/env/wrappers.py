@@ -334,10 +334,20 @@ class PokeEnvWrapper(OpenAIGymEnv):
             return
 
         params = self._init_params
+        print(
+            f"[DEBUG] _ensure_initialized: player_username={self.player_username} "
+            f"battle_format={params['battle_format']} backend={getattr(self, 'player_class', type(None)).__name__}",
+            flush=True,
+        )
 
         # Create opponent if needed
         if params['opponent_type'] is not None:
             opponent_team_set = params['opponent_team_set'] or copy.deepcopy(params['player_team_set'])
+            print(
+                f"[DEBUG] _ensure_initialized: creating opponent type={params['opponent_type'].__name__} "
+                f"opponent_username={self.opponent_username}",
+                flush=True,
+            )
             self._current_opponent = params['opponent_type'](
                 battle_format=params['battle_format'],
                 team=opponent_team_set,
@@ -348,6 +358,16 @@ class PokeEnvWrapper(OpenAIGymEnv):
             )
 
         # Initialize parent class (creates Player with network connection)
+        sc = self.server_configuration
+        try:
+            ws = getattr(sc, 'ws_url', None)
+            au = getattr(sc, 'auth_url', None)
+            print(
+                f"[DEBUG] _ensure_initialized: connecting ws={ws or 'LocalhostServerConfiguration'} auth={au or ''}",
+                flush=True,
+            )
+        except Exception:
+            pass
         super().__init__(
             player_class=self.player_class,
             battle_format=params['battle_format'],
@@ -358,6 +378,7 @@ class PokeEnvWrapper(OpenAIGymEnv):
             start_timer_on_battle_start=params['start_timer_on_battle_start'],
             start_challenging=params['start_challenging'],
         )
+        print(f"[DEBUG] _ensure_initialized: Player initialized username={self.player_username}", flush=True)
 
         self._initialized = True
 
@@ -380,11 +401,18 @@ class PokeEnvWrapper(OpenAIGymEnv):
 
         # Use poke-env's built-in LocalhostServerConfiguration when matching defaults
         if host in {"127.0.0.1", "localhost"} and port_int == 8000:
+            print(
+                f"[DEBUG] server_configuration: LocalhostServerConfiguration host={host} "
+                f"port=8000 (env SHOWDOWN_HOST={os.environ.get('SHOWDOWN_HOST')} "
+                f"SHOWDOWN_PORT={os.environ.get('SHOWDOWN_PORT')} PORT={os.environ.get('PORT')})",
+                flush=True,
+            )
             return LocalhostServerConfiguration
 
         # Otherwise, construct a custom configuration for the given host/port
         ws_url = f"ws://{host}:{port_int}/showdown/websocket"
         auth_url = f"http://{host}:{port_int}/action.php?"
+        print(f"[DEBUG] server_configuration: custom ServerConfiguration ws={ws_url} auth={auth_url}", flush=True)
         return ServerConfiguration(ws_url, auth_url)
 
     @property
@@ -656,16 +684,22 @@ class QueueOnLocalLadder(PokeEnvWrapper):
             save_team_results_to=save_team_results_to,
             battle_backend=battle_backend,
         )
-        print(f"Laddering for {num_battles} battles")
+        print(f"Laddering for {num_battles} battles", flush=True)
         self.print_battle_bar = print_battle_bar
         self.player_username = player_username
         self.player_password = player_password
         self.num_battles = num_battles
         self._ensure_initialized()
+        print(
+            f"[DEBUG] QueueOnLocalLadder: initialized username={self.player_username} "
+            f"server={os.environ.get('SHOWDOWN_HOST', '127.0.0.1')}:{os.environ.get('SHOWDOWN_PORT') or os.environ.get('PORT') or '8000'}",
+            flush=True,
+        )
         self.handle_ladder_start(n_challenges=num_battles)
 
     def handle_ladder_start(self, n_challenges: int):
         # hook to allow throttling on pokeagent ladder
+        print(f"[DEBUG] handle_ladder_start: start_laddering n_challenges={n_challenges}", flush=True)
         return self.start_laddering(n_challenges=n_challenges)
 
     def step(self, action):
