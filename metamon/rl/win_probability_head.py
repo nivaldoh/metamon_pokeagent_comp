@@ -125,18 +125,32 @@ class MetamonWinProbAgent(nn.Module):
         Backbone runs under no_grad() in eval mode; gradients flow only through the head.
         """
         import amago  # type: ignore
-        # always keep backbone deterministic
-        self.agent.eval()
+        # Head mode
         if use_model_mode == "train":
             self.head.train()
         else:
             self.head.eval()
 
+        # Backbone forward under no_grad. If hidden_state is None, the Transformer
+        # expects training=True for the training_forward path. Temporarily toggle
+        # the relevant modules to train mode to satisfy assertion, but keep no_grad.
         with torch.no_grad():
-            tstep_emb = self.agent.tstep_encoder(obs=obs, rl2s=rl2s)
-            s_rep, _ = self.agent.traj_encoder(
-                seq=tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state
-            )
+            prev_te = self.agent.tstep_encoder.training
+            prev_tr = self.agent.traj_encoder.training
+            try:
+                if hidden_state is None:
+                    self.agent.tstep_encoder.train(True)
+                    self.agent.traj_encoder.train(True)
+                else:
+                    self.agent.tstep_encoder.eval()
+                    self.agent.traj_encoder.eval()
+                tstep_emb = self.agent.tstep_encoder(obs=obs, rl2s=rl2s)
+                s_rep, _ = self.agent.traj_encoder(
+                    seq=tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state
+                )
+            finally:
+                self.agent.tstep_encoder.train(prev_te)
+                self.agent.traj_encoder.train(prev_tr)
         logits = self.head(s_rep, mask=mask)
         return s_rep, logits
 
@@ -148,17 +162,25 @@ class MetamonWinProbAgent(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns (s_rep, logits). No @torch.no_grad() so the head can learn; backbone is eval+no_grad."""
         import amago  # type: ignore
-        self.agent.eval()
         if use_model_mode == "train":
             self.head.train()
         else:
             self.head.eval()
 
         with torch.no_grad():
-            o = self.agent.tstep_encoder(obs=batch.obs, rl2s=batch.rl2s)
-            s_rep, _ = self.agent.traj_encoder(
-                seq=o, time_idxs=batch.time_idxs, hidden_state=None
-            )
+            prev_te = self.agent.tstep_encoder.training
+            prev_tr = self.agent.traj_encoder.training
+            try:
+                # hidden_state is None during batch training → use training path
+                self.agent.tstep_encoder.train(True)
+                self.agent.traj_encoder.train(True)
+                o = self.agent.tstep_encoder(obs=batch.obs, rl2s=batch.rl2s)
+                s_rep, _ = self.agent.traj_encoder(
+                    seq=o, time_idxs=batch.time_idxs, hidden_state=None
+                )
+            finally:
+                self.agent.tstep_encoder.train(prev_te)
+                self.agent.traj_encoder.train(prev_tr)
         # Build mask like Agent's state mask (True/1 where valid)
         pad_val = self.agent.pad_val
         state_mask = (~((batch.rl2s == pad_val).all(-1, keepdim=True))).float()
