@@ -15,6 +15,11 @@ from metamon.rl.gcs_checkpoint import (
     patch_experiment_for_gcs,
     train_with_gcs_checkpoints,
 )
+from metamon.rl.win_probability_head import (
+    WinProbabilityHead,
+    MetamonWinProbAgent,
+)
+from metamon.rl.win_probability_experiment import MetamonWinProbExperiment
 
 import os
 

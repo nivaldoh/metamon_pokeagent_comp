@@ -44,6 +44,92 @@ else:
     from amago.envs.amago_env import AMAGO_ENV_LOG_PREFIX
 
 
+def _get_eval_decode_config():
+    """Read eval-only decode settings from environment variables.
+
+    Environment variables:
+      - METAMON_EVAL_TEMPERATURE (float, default 1.0)
+      - METAMON_HARD_ARGMAX_IF_CONFIDENT (bool, default False)
+      - METAMON_ARGMAX_CONFIDENCE_DELTA (float, default 0.05)
+      - METAMON_LOGIT_NOISE_STD (float, default 0.0)
+    """
+    def _get_float(name, default):
+        try:
+            return float(os.environ.get(name, default))
+        except Exception:
+            return default
+
+    def _get_bool(name, default):
+        val = os.environ.get(name, None)
+        if val is None:
+            return default
+        return str(val).lower() in {"1", "true", "t", "yes", "y"}
+
+    return {
+        "eval_temperature": _get_float("METAMON_EVAL_TEMPERATURE", 1.0),
+        "hard_argmax_if_confident": _get_bool(
+            "METAMON_HARD_ARGMAX_IF_CONFIDENT", False
+        ),
+        "argmax_confidence_delta": _get_float(
+            "METAMON_ARGMAX_CONFIDENCE_DELTA", 0.05
+        ),
+        "logit_noise_std": _get_float("METAMON_LOGIT_NOISE_STD", 0.0),
+    }
+
+
+def _apply_eval_decode(
+    dist_params: torch.Tensor, illegal_mask: Optional[torch.Tensor]
+) -> torch.Tensor:
+    """
+    Eval-time only: temperature scaling, optional tiny logit noise, and optional
+    hard argmax when the policy is confident. Returns modified logits.
+
+    Args:
+      dist_params: [B, L, G, N] logits
+      illegal_mask: [B, L, N] (True where illegal). Not modified; any -inf entries
+        already in dist_params remain -inf.
+    """
+    if dist_params is None:
+        return dist_params
+
+    cfg = _get_eval_decode_config()
+    T = cfg["eval_temperature"]
+    noise_std = cfg["logit_noise_std"]
+    hard_argmax = cfg["hard_argmax_if_confident"]
+    delta = cfg["argmax_confidence_delta"]
+
+    # Temperature scaling
+    if T != 1.0:
+        dist_params = dist_params / max(T, 1e-6)
+
+    # Optional tiny Gaussian noise; masked -inf stays -inf
+    if noise_std > 0.0:
+        dist_params = dist_params + torch.randn_like(dist_params) * noise_std
+
+    if hard_argmax:
+        # Compute top-1 vs top-2 prob gap per [B,L,G]
+        probs = torch.softmax(dist_params, dim=-1)
+        top2p, top2idx = torch.topk(probs, k=2, dim=-1)
+        p1 = top2p[..., 0]
+        p2 = top2p[..., 1]
+        gap = p1 - p2
+
+        # Build keep mask for argmax indices
+        argmax_idx = top2idx[..., 0]  # [B,L,G]
+        keep = torch.zeros_like(dist_params, dtype=torch.bool)  # [B,L,G,N]
+        keep.scatter_(-1, argmax_idx.unsqueeze(-1), True)
+
+        confident = (gap >= delta).unsqueeze(-1)  # [B,L,G,1]
+        # For confident positions: set all non-argmax logits to -inf
+        dist_params = torch.where(
+            confident & ~keep,
+            torch.full_like(dist_params, -float("inf")),
+            dist_params,
+        )
+
+    return dist_params
+
+
 def _block_warnings():
     """Suppress common gymnasium warnings during environment creation."""
     warnings.filterwarnings("ignore", category=UserWarning)
@@ -204,24 +290,17 @@ class MetamonAMAGOWrapper(amago.envs.AMAGOEnv):
     """
 
     def __init__(self, metamon_env: PokeEnvWrapper):
-        print(f"[DEBUG] MetamonAMAGOWrapper.__init__ called")
-        print(f"[DEBUG] Environment type: {type(metamon_env).__name__}")
         self.metamon_action_space = metamon_env.metamon_action_space
-        print(f"[DEBUG] Action space type: {type(metamon_env.metamon_action_space).__name__}")
-
-        print("[DEBUG] Calling super().__init__...")
         super().__init__(
             env=metamon_env,
             env_name="metamon",
             batched_envs=1,
         )
-        print("[DEBUG] super().__init__ completed")
 
         assert isinstance(self.action_space, gym.spaces.Discrete)
         self.observation_space["illegal_actions"] = gym.spaces.Box(
             low=0, high=1, shape=(self.action_space.n,), dtype=bool
         )
-        print(f"[DEBUG] MetamonAMAGOWrapper initialization complete")
 
     def add_illegal_action_mask_to_obs(self, obs: dict, info: dict):
         # move legal action from info to obs
@@ -328,6 +407,15 @@ class MetamonMaskedActor(amago.nets.actor_critic.Actor):
             mask = torch.logical_and(mask, ~no_options)
             mask = einops.repeat(mask, f"b l n -> b l {Gammas} n")
             dist_params.masked_fill_(mask, -float("inf"))
+        # Eval-only decode shaping: temperature, optional noise, and optional
+        # hard-argmax-if-confident
+        if (
+            not self.training
+            and straight_from_obs is not None
+            and "illegal_actions" in straight_from_obs
+        ):
+            illegal_mask = straight_from_obs["illegal_actions"]
+            dist_params = _apply_eval_decode(dist_params, illegal_mask)
         return dist_params
 
 
@@ -384,6 +472,15 @@ class MetamonMaskedResidualActor(amago.nets.actor_critic.ResidualActor):
             mask = torch.logical_and(mask, ~no_options)
             mask = einops.repeat(mask, f"b l n -> b l {Gammas} n")
             dist_params.masked_fill_(mask, -float("inf"))
+        # Eval-only decode shaping: temperature, optional noise, and optional
+        # hard-argmax-if-confident
+        if (
+            not self.training
+            and straight_from_obs is not None
+            and "illegal_actions" in straight_from_obs
+        ):
+            illegal_mask = straight_from_obs["illegal_actions"]
+            dist_params = _apply_eval_decode(dist_params, illegal_mask)
         return dist_params
 
 

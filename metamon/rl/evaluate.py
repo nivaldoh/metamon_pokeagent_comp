@@ -169,7 +169,8 @@ def pretrained_vs_pretrained_headtohead(
     username1: str,
     username2: str,
     battle_format: str,
-    team_set_name: str,
+    team_set_name_1: str,
+    team_set_name_2: str,
     total_battles: int,
     battle_backend: str = "poke-env",
     save_trajectories_to: Optional[str] = None,
@@ -201,7 +202,7 @@ def pretrained_vs_pretrained_headtohead(
             agent1_spec,
             username1,
             battle_format,
-            team_set_name,
+            team_set_name_1,
             total_battles,
             battle_backend,
             agent1_dir,
@@ -215,7 +216,7 @@ def pretrained_vs_pretrained_headtohead(
             agent2_spec,
             username2,
             battle_format,
-            team_set_name,
+            team_set_name_2,
             total_battles,
             battle_backend,
             agent2_dir,
@@ -426,6 +427,21 @@ def _get_default_eval(args, base_eval_kwargs):
 
 
 def _run_default_evaluation(args) -> Dict[str, List[Dict[str, Any]]]:
+    # Bridge CLI decode controls to env so actor heads can read them at eval time
+    import os as _os
+    if hasattr(args, "eval_temperature"):
+        _os.environ["METAMON_EVAL_TEMPERATURE"] = str(args.eval_temperature)
+    if hasattr(args, "hard_argmax_if_confident"):
+        _os.environ["METAMON_HARD_ARGMAX_IF_CONFIDENT"] = (
+            "1" if args.hard_argmax_if_confident else "0"
+        )
+    if hasattr(args, "argmax_confidence_delta"):
+        _os.environ["METAMON_ARGMAX_CONFIDENCE_DELTA"] = str(
+            args.argmax_confidence_delta
+        )
+    if hasattr(args, "logit_noise_std"):
+        _os.environ["METAMON_LOGIT_NOISE_STD"] = str(args.logit_noise_std)
+
     pretrained_model = get_pretrained_model(args.agent)
     all_results = collections.defaultdict(list)
     for gen in args.gens:
@@ -559,6 +575,37 @@ def add_cli(parser):
         "--log_to_wandb",
         action="store_true",
         help="Log results to Weights & Biases.",
+    )
+
+    # Eval-time decoding controls
+    parser.add_argument(
+        "--eval_temperature",
+        type=float,
+        default=0.7,
+        help="Eval-time temperature applied inside actor heads (default 0.7).",
+    )
+    parser.add_argument(
+        "--hard_argmax_if_confident",
+        action="store_true",
+        help=(
+            "If set, force argmax on steps where the top-1 vs top-2 prob gap "
+            ">= delta."
+        ),
+    )
+    parser.add_argument(
+        "--argmax_confidence_delta",
+        type=float,
+        default=0.05,
+        help=(
+            "Min probability gap (p1 - p2) to trigger hard argmax when "
+            "--hard_argmax_if_confident is set."
+        ),
+    )
+    parser.add_argument(
+        "--logit_noise_std",
+        type=float,
+        default=0.0,
+        help="Optional tiny Gaussian logit noise at eval (default 0, off).",
     )
 
     return parser
