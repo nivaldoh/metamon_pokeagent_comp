@@ -4,6 +4,7 @@ set -euo pipefail
 # --- Config (edit if you prefer HTTPS for the main clone) ---
 METAMON_SSH_REPO="git@github.com:nivaldoh/metamon.git"
 AMAGO_HTTPS_REPO="https://github.com/UT-Austin-RPL/amago.git"
+AMAGO_FORK_SSH_REPO="git@github.com:nivaldoh/amago.git"
 
 # --- Clone Metamon (with submodules) ---
 # Do this before running the script
@@ -17,7 +18,9 @@ AMAGO_HTTPS_REPO="https://github.com/UT-Austin-RPL/amago.git"
 
 # --- Clone AMAGO into Metamon root and install (editable) ---
 if [ ! -d "amago/.git" ]; then
-  git clone "${AMAGO_HTTPS_REPO}" amago
+  #git clone "${AMAGO_HTTPS_REPO}" amago
+  git clone "${AMAGO_FORK_SSH_REPO}" amago
+  
 else
   echo "[info] amago already exists under metamon/; updating"
   (cd amago && git fetch --all && git pull --rebase)
