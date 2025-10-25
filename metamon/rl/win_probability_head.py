@@ -76,6 +76,10 @@ class WinProbabilityHead(nn.Module):
         """Convenience: sigmoid(head(s_rep)). Returns [B, 1] float in [0,1]."""
         return torch.sigmoid(self.forward(s_rep, mask))
 
+    def forward_all_steps(self, s_rep: torch.Tensor) -> torch.Tensor:
+        """Apply the head at every timestep. Returns logits [B, L, 1]."""
+        return self.net(s_rep)
+
 
 @gin.configurable
 class MetamonWinProbAgent(nn.Module):
@@ -135,22 +139,17 @@ class MetamonWinProbAgent(nn.Module):
         # expects training=True for the training_forward path. Temporarily toggle
         # the relevant modules to train mode to satisfy assertion, but keep no_grad.
         with torch.no_grad():
-            prev_te = self.agent.tstep_encoder.training
-            prev_tr = self.agent.traj_encoder.training
-            try:
-                if hidden_state is None:
-                    self.agent.tstep_encoder.train(True)
-                    self.agent.traj_encoder.train(True)
-                else:
-                    self.agent.tstep_encoder.eval()
-                    self.agent.traj_encoder.eval()
-                tstep_emb = self.agent.tstep_encoder(obs=obs, rl2s=rl2s)
-                s_rep, _ = self.agent.traj_encoder(
-                    seq=tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state
-                )
-            finally:
-                self.agent.tstep_encoder.train(prev_te)
-                self.agent.traj_encoder.train(prev_tr)
+            # Keep frozen backbone deterministic
+            self.agent.eval()
+            # If no hidden_state provided, allocate a temporary one for inference path
+            if hidden_state is None:
+                B = rl2s.shape[0]
+                device = rl2s.device
+                hidden_state = self.agent.traj_encoder.init_hidden_state(B, device)
+            tstep_emb = self.agent.tstep_encoder(obs=obs, rl2s=rl2s)
+            s_rep, _ = self.agent.traj_encoder(
+                seq=tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state
+            )
         logits = self.head(s_rep, mask=mask)
         return s_rep, logits
 
@@ -168,21 +167,53 @@ class MetamonWinProbAgent(nn.Module):
             self.head.eval()
 
         with torch.no_grad():
-            prev_te = self.agent.tstep_encoder.training
-            prev_tr = self.agent.traj_encoder.training
-            try:
-                # hidden_state is None during batch training → use training path
-                self.agent.tstep_encoder.train(True)
-                self.agent.traj_encoder.train(True)
-                o = self.agent.tstep_encoder(obs=batch.obs, rl2s=batch.rl2s)
-                s_rep, _ = self.agent.traj_encoder(
-                    seq=o, time_idxs=batch.time_idxs, hidden_state=None
-                )
-            finally:
-                self.agent.tstep_encoder.train(prev_te)
-                self.agent.traj_encoder.train(prev_tr)
+            # frozen backbone, deterministic encodings using inference path
+            self.agent.eval()
+            B = batch.rl2s.shape[0]
+            device = batch.rl2s.device
+            hs = self.agent.traj_encoder.init_hidden_state(B, device)
+            o = self.agent.tstep_encoder(obs=batch.obs, rl2s=batch.rl2s)
+            s_rep, _ = self.agent.traj_encoder(
+                seq=o, time_idxs=batch.time_idxs, hidden_state=hs
+            )
         # Build mask like Agent's state mask (True/1 where valid)
         pad_val = self.agent.pad_val
         state_mask = (~((batch.rl2s == pad_val).all(-1, keepdim=True))).float()
         logits = self.head(s_rep, mask=state_mask)
         return s_rep, logits
+
+    @torch.no_grad()
+    def _encode_batch(self, batch: "amago.loading.Batch") -> torch.Tensor:
+        """Frozen backbone encodings [B, L, D] in eval+no_grad using inference path."""
+        self.agent.eval()
+        B = batch.rl2s.shape[0]
+        device = batch.rl2s.device
+        hs = self.agent.traj_encoder.init_hidden_state(B, device)
+        o = self.agent.tstep_encoder(obs=batch.obs, rl2s=batch.rl2s)
+        s_rep, _ = self.agent.traj_encoder(seq=o, time_idxs=batch.time_idxs, hidden_state=hs)
+        return s_rep
+
+    def logits_all_steps_from_batch(
+        self, batch: "amago.loading.Batch"
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return (s_rep [B,L,D], logits [B,L,1], valid_mask [B,L,1]).
+
+        valid_mask excludes padding and the post-terminal timestep (i = last_done + 1).
+        """
+        s_rep = self._encode_batch(batch)
+        logits = self.head.forward_all_steps(s_rep)  # [B, L, 1]
+
+        # Base validity from RL2 padding
+        pad_val = self.agent.pad_val
+        base_valid = (~((batch.rl2s == pad_val).all(-1, keepdim=True)))  # [B,L,1]
+
+        # Exclude post-terminal timestep (i = argmax(dones) + 1)
+        dones = batch.dones.squeeze(-1)  # [B, L-1]
+        B, Lm1 = dones.shape
+        L = batch.rl2s.shape[1]
+        last_done = torch.argmax(dones.int(), dim=1)  # [B]
+        time = torch.arange(L, device=logits.device).unsqueeze(0)  # [1,L]
+        not_future = (time <= last_done.unsqueeze(1)).unsqueeze(-1)  # [B,L,1]
+
+        valid_mask = base_valid & not_future
+        return s_rep, logits, valid_mask

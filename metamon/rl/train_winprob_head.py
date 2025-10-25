@@ -56,7 +56,7 @@ class TrainConfig:
     val_steps: int = 2000
     mixed_precision: bool = True
     device: Optional[str] = None
-    log: bool = False
+    log: bool = True
 
 
 def build_label_from_batch(batch: amago.loading.Batch) -> torch.Tensor:
@@ -134,11 +134,15 @@ def main(cfg: TrainConfig):
                 while total < cfg.val_steps:
                     samples = [amago_dset.sample_random_trajectory() for _ in range(cfg.batch_size)]
                     batch = amago.loading.RLData_pad_collate(samples).to(device)
-                    _, logits = head_wrapper.compute_from_batch(batch, use_model_mode="eval")
-                    prob = torch.sigmoid(logits)  # [B,1]
-                    y = build_label_from_batch(batch)
+                    # Use the last pre-terminal timestep for evaluation
+                    _, logits, _ = head_wrapper.logits_all_steps_from_batch(batch)
+                    prob_all = torch.sigmoid(logits).squeeze(-1)  # [B,L]
+                    last_done = torch.argmax(batch.dones.squeeze(-1).int(), dim=1)  # [B]
+                    B = last_done.shape[0]
+                    p_sel = prob_all[torch.arange(B, device=prob_all.device), last_done].unsqueeze(-1)  # [B,1]
+                    y = build_label_from_batch(batch)  # [B,1]
                     ys.append(y.detach().cpu())
-                    ps.append(prob.detach().cpu())
+                    ps.append(p_sel.detach().cpu())
                     total += y.shape[0]
                     pbar_v.update(y.shape[0])
                 pbar_v.close()
@@ -186,10 +190,12 @@ def main(cfg: TrainConfig):
 
             # forward
             with torch.cuda.amp.autocast(enabled=cfg.mixed_precision and torch.cuda.is_available()):
-                # compute_from_batch now returns logits
-                s_rep, logits = head_wrapper.compute_from_batch(batch, use_model_mode="train")
-                y = build_label_from_batch(batch)  # [B, 1]
-                loss = F.binary_cross_entropy_with_logits(logits, y)
+                # Per-timestep logits and no-future masking to avoid leakage
+                s_rep, logits, valid_mask = head_wrapper.logits_all_steps_from_batch(batch)
+                y_seq = build_label_from_batch(batch).unsqueeze(1).expand_as(logits)
+                per_ts_loss = F.binary_cross_entropy_with_logits(logits, y_seq, reduction="none")
+                mask = valid_mask.float()
+                loss = (per_ts_loss * mask).sum() / mask.sum().clamp_min(1.0)
 
             # backward
             scaler.scale(loss / cfg.grad_accum).backward()
