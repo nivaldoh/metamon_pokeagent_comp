@@ -114,7 +114,8 @@ All parameters from `examples/self_play_battle.py` can be set via environment va
 | `AGENT2` | `SyntheticRLV2` | HuggingFace model name for agent 2 |
 | `BATTLE_FORMAT` | `gen1ou` | Battle format (gen1ou, gen2ou, etc.) |
 | `NUM_BATTLES` | `100` | Number of battles per agent |
-| `TEAM_SET` | `competitive` | Team set to use |
+| `TEAM_SET_1` | `competitive` | Team set for agent 1 |
+| `TEAM_SET_2` | `competitive` | Team set for agent 2 |
 | `CONCURRENCY` | `1` | Number of parallel agent pairs |
 | `USERNAME1` | `SelfPlayAgent1` | Username for agent 1 |
 | `USERNAME2` | `SelfPlayAgent2` | Username for agent 2 |
@@ -145,6 +146,8 @@ docker run metamon-selfplay \
   --agent1 SyntheticRLV2 \
   --agent2 MediumRL \
   --battle_format gen3ou \
+  --team_set_1 modern_replays \
+  --team_set_2 paper_replays \
   --num_battles 1000 \
   --save_trajectories_to /cache/trajectories
 ```
@@ -216,18 +219,19 @@ Provide a JSON Lines manifest under the repository's `manifests/` directory and 
 Example manifest (`params.jsonl`):
 
 ```
-{"battle_format":"gen1ou","agent1":"SyntheticRLV1","agent2":"SyntheticRLV2","team_set":"competitive","num_battles":100,"cfg_tag":"gen1ou_SyntheticRLV1_SyntheticRLV2_competitive"}
-{"battle_format":"gen1ou","agent1":"SyntheticRLV1","agent2":"SyntheticRLV2","team_set":"competitive","num_battles":100,"cfg_tag":"gen1ou_SyntheticRLV1_SyntheticRLV2_competitive"}
-{"battle_format":"gen9ou","agent1":"Abra","agent2":"Abra","team_set":"modern_replays","num_battles":50,"cfg_tag":"gen9ou_Abra_Abra_modern_replays"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV1","agent2":"SyntheticRLV2","team_set_1":"competitive","team_set_2":"competitive","num_battles":100,"cfg_tag":"gen1ou_SyntheticRLV1_competitive__vs__competitive_SyntheticRLV2"}
+{"battle_format":"gen1ou","agent1":"SyntheticRLV1","agent2":"SyntheticRLV2","team_set_1":"modern_replays","team_set_2":"paper_replays","num_battles":100,"cfg_tag":"gen1ou_SyntheticRLV1_modern_replays__vs__paper_replays_SyntheticRLV2"}
+{"battle_format":"gen9ou","agent1":"Abra","agent2":"Abra","team_set_1":"modern_replays","team_set_2":"modern_replays","num_battles":50,"cfg_tag":"gen9ou_Abra_modern_replays__vs__modern_replays_Abra"}
 ```
 
 Supported keys map to env vars used by the runner:
 - `agent1` → `AGENT1`
 - `agent2` → `AGENT2`
 - `battle_format` → `BATTLE_FORMAT`
-- `team_set` → `TEAM_SET`
+- `team_set_1` → `TEAM_SET_1`
+- `team_set_2` → `TEAM_SET_2`
 - `num_battles` → `NUM_BATTLES`
-- `cfg_tag` → `CFG_TAG` (optional; defaults to `<format>_<agent1>_<agent2>_<team_set>`)
+- `cfg_tag` → `CFG_TAG` (optional; defaults to `<format>_<agent1>_<team_set_1>__vs__<team_set_2>_<agent2>`)
 
 Output directory: when `JSONL_TASK_MANIFEST` is set, `run_self_play.sh` constructs a per-task save path automatically using a UTC run id and config tag. The base path is controlled by `OUTPUT_BASE` (defaults to `/selfplay`):
 

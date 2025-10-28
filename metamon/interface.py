@@ -309,6 +309,36 @@ class UniversalPokemon:
     tera_type: str
     base_species: str
 
+    @classmethod
+    def blank(cls):
+        """Return a placeholder UniversalPokemon for states with no active Pokemon (e.g., teampreview)."""
+        return cls(
+            name="unknown",
+            base_species="unknown",
+            hp_pct=1.0,
+            types="notype notype",
+            tera_type="notype",
+            item="unknownitem",
+            ability="unknownability",
+            lvl=100,
+            status="nostatus",
+            effect="noeffect",
+            moves=[],
+            atk_boost=0,
+            spa_boost=0,
+            def_boost=0,
+            spd_boost=0,
+            spe_boost=0,
+            accuracy_boost=0,
+            evasion_boost=0,
+            base_atk=0,
+            base_spa=0,
+            base_def=0,
+            base_spd=0,
+            base_spe=0,
+            base_hp=0,
+        )
+
     @staticmethod
     def universal_items(item_rep: Optional[str | ReplayNothing]) -> str:
         if item_rep is None or item_rep == "unknown_item":
@@ -404,6 +434,9 @@ class UniversalPokemon:
 
     @classmethod
     def from_Pokemon(cls, pokemon: Pokemon):
+        # During teampreview or early battle setup, active Pokemon may be None.
+        if pokemon is None:
+            return cls.blank()
         # do not use Battle.available_moves
         # NOTE: new replay parser lets movesets go over 4 for some dittos... so temporary fix here
         moves = [UniversalMove.from_Move(move) for move in pokemon.moves.values()][:4]
@@ -471,7 +504,11 @@ class UniversalPokemon:
         p._item = pokemon.active_item
         p._status = pokemon.status
         p._temporary_ability = pokemon.active_ability
-        p._previous_move = pokemon.last_used_move
+        # Older/newer poke_env versions may not allow setting private slots; ignore if unsupported
+        try:
+            p._previous_move = pokemon.last_used_move
+        except Exception:
+            pass
         p._terastallized_type = (
             PokemonType.from_name(pokemon.tera_type) if pokemon.tera_type else None
         )
@@ -571,15 +608,16 @@ class UniversalState:
         battle_field = cls.universal_field(battle.fields)
         player_conditions = cls.universal_conditions(battle.side_conditions)
         opponent_conditions = cls.universal_conditions(battle.opponent_side_conditions)
-        active = UniversalPokemon.from_Pokemon(battle.active_pokemon)
-        opponent = UniversalPokemon.from_Pokemon(battle.opponent_active_pokemon)
+        # Active Pokemon may be None during teampreview
+        active = UniversalPokemon.from_Pokemon(getattr(battle, 'active_pokemon', None))
+        opponent = UniversalPokemon.from_Pokemon(getattr(battle, 'opponent_active_pokemon', None))
         if battle.reviving:
             possible_switches = [p for p in battle.team.values() if p.fainted and not p.active]
         else:
             possible_switches = [p for p in battle.team.values() if not p.fainted and not p.active]
         switches = [UniversalPokemon.from_Pokemon(p) for p in possible_switches]
-        player_prev_move = UniversalMove.from_Move(battle.active_pokemon.previous_move)
-        opponent_prev_move = UniversalMove.from_Move(battle.opponent_active_pokemon.previous_move)
+        player_prev_move = UniversalMove.from_Move(getattr(getattr(battle, 'active_pokemon', None), 'previous_move', None))
+        opponent_prev_move = UniversalMove.from_Move(getattr(getattr(battle, 'opponent_active_pokemon', None), 'previous_move', None))
         # NOTE: always assumes 6 in the party, and this will probably never change for backwards compat
         opponents_remaining = 6 - sum(p.status == Status.FNT for p in battle.opponent_team.values())
         opponent_teampreview = [pokemon_name(p.base_species) for p in battle.teampreview_opponent_team if p is not None]

@@ -4,18 +4,32 @@ import copy
 import json
 import warnings
 from datetime import datetime
-from typing import Optional, Type, Any, List
+from typing import Optional, Type, Any, List, cast
 
 import numpy as np
 import lz4.frame
 import gymnasium as gym
+import inspect
 
 from poke_env import (
     AccountConfiguration,
     LocalhostServerConfiguration,
 )
 from poke_env.environment import Battle
-from poke_env.player import OpenAIGymEnv, Player
+
+# from poke_env.player import OpenAIGymEnv, Player
+try:
+    # Modern Gymnasium wrapper (preferred)
+    from poke_env.player import Gen9EnvPlayer as OpenAIGymEnv
+except ImportError:
+    try:
+        # Some releases expose the single-player variant
+        from poke_env.player import Gen9EnvSinglePlayer as OpenAIGymEnv
+    except ImportError:
+        # Absolute fallback so older code paths don't crash at import time
+        from poke_env.player import Player as OpenAIGymEnv
+
+from poke_env.player import Player
 from poke_env.teambuilder import Teambuilder
 from poke_env.ps_client.server_configuration import ServerConfiguration
 
@@ -339,6 +353,14 @@ class PokeEnvWrapper(OpenAIGymEnv):
             f"battle_format={params['battle_format']} backend={getattr(self, 'player_class', type(None)).__name__}",
             flush=True,
         )
+        try:
+            has_parent_env_move = hasattr(OpenAIGymEnv, "_env_move")
+            print(
+                f"[DEBUG] _ensure_initialized: OpenAIGymEnv has _env_move={has_parent_env_move}",
+                flush=True,
+            )
+        except Exception:
+            pass
 
         # Create opponent if needed
         if params['opponent_type'] is not None:
@@ -368,8 +390,16 @@ class PokeEnvWrapper(OpenAIGymEnv):
             )
         except Exception:
             pass
-        super().__init__(
-            player_class=self.player_class,
+        # Build kwarg set compatible with both old/new poke-env wrappers
+        base_init = getattr(OpenAIGymEnv, "__init__", None)
+        base_params = set()
+        if base_init is not None:
+            try:
+                base_params = set(inspect.signature(base_init).parameters.keys())
+            except Exception:
+                base_params = set()
+
+        kwargs = dict(
             battle_format=params['battle_format'],
             server_configuration=self.server_configuration,
             account_configuration=self.player_account_configuration,
@@ -378,7 +408,43 @@ class PokeEnvWrapper(OpenAIGymEnv):
             start_timer_on_battle_start=params['start_timer_on_battle_start'],
             start_challenging=params['start_challenging'],
         )
+        # Newer wrappers accept selecting the underlying player class via 'player_class'
+        if 'player_class' in base_params:
+            kwargs['player_class'] = self.player_class
+        # Older EnvPlayer path expects an explicit 'opponent' argument
+        if 'opponent' in base_params:
+            # Provide an opponent if one was constructed; otherwise, use None
+            # (poke-env will handle laddering without a pre-specified opponent).
+            kwargs['opponent'] = getattr(self, '_current_opponent', None)
+
+        super().__init__(**kwargs)
         print(f"[DEBUG] _ensure_initialized: Player initialized username={self.player_username}", flush=True)
+        try:
+            has_self_env_move = hasattr(self, "_env_move")
+            print(
+                f"[DEBUG] _ensure_initialized: self has _env_move={has_self_env_move}",
+                flush=True,
+            )
+        except Exception:
+            pass
+
+        # Ensure a valid team preview response is available and bound across versions
+        try:
+            self._bind_teampreview()
+        except Exception:
+            pass
+
+        # Install extra preview debug logging at the Player level (once)
+        try:
+            self._install_player_preview_debug()
+        except Exception:
+            pass
+
+        # Patch _AsyncPlayer preview path so it returns '/team ...' during teampreview
+        try:
+            self._install_asyncplayer_preview_patch()
+        except Exception:
+            pass
 
         self._initialized = True
 
@@ -494,9 +560,15 @@ class PokeEnvWrapper(OpenAIGymEnv):
         battle_order = universal_action.to_BattleOrder(battle)
         if battle_order is None:
             self.invalid_action_counter += 1
+            print(f"[DEBUG] action_to_move: action={action} -> INVALID (fallback)", flush=True)
             return self.on_invalid_order(battle)
         else:
             self.valid_action_counter += 1
+            try:
+                msg = getattr(battle_order, 'message', '<no-message>')
+            except Exception:
+                msg = '<no-message>'
+            print(f"[DEBUG] action_to_move: action={action} -> VALID order={type(battle_order).__name__} msg={msg}", flush=True)
             return battle_order
 
     def describe_embedding(self) -> gym.spaces.Space:
@@ -521,7 +593,12 @@ class PokeEnvWrapper(OpenAIGymEnv):
     def embed_battle(self, battle: Battle):
         universal_state = UniversalState.from_Battle(battle)
         self._most_recent_state = universal_state
-        self._update_legal_actions(universal_state, battle)
+        legal = self._update_legal_actions(universal_state, battle)
+        try:
+            turn = getattr(battle, 'turn', None)
+            print(f"[DEBUG] embed_battle: turn={turn} legal_actions={legal}", flush=True)
+        except Exception:
+            pass
         return self.metamon_obs_space.state_to_obs(universal_state)
 
     def step(self, action):
@@ -529,7 +606,9 @@ class PokeEnvWrapper(OpenAIGymEnv):
         self._ensure_initialized()
 
         self.turn_counter += 1
+        print(f"[DEBUG] step: action={action}", flush=True)
         next_obs, reward, terminated, truncated, info = super().step(action)
+        print(f"[DEBUG] step: reward={reward} terminated={terminated} truncated={truncated}", flush=True)
         info["legal_actions"] = self._most_recent_legal_actions
         if self.save_trajectories_to is not None:
             self.trajectory["states"].append(self._most_recent_state)
@@ -590,7 +669,314 @@ class PokeEnvWrapper(OpenAIGymEnv):
         # Only close if we've been initialized
         if self._initialized:
             self.close(purge=False)
-            self.reset_battles()
+        self.reset_battles()
+
+    # ---- Team Preview (base) ----
+    # Always provide a sane default: pick all slots in natural order.
+    def teampreview(self, battle: Battle) -> str:  # type: ignore[override]
+        try:
+            size = getattr(battle, "max_team_size", None)
+            if not isinstance(size, int) or size <= 0:
+                size = len(getattr(battle, "team", {})) or 6
+        except Exception:
+            size = 6
+        order = "".join(str(i + 1) for i in range(size))
+        return f"/team {order}"
+
+    # Some older OpenAI-Gym wrappers query an env-level hook; keep it in sync.
+    def _env_teampreview(self, battle: Battle) -> str:
+        return self.teampreview(battle)
+
+    def _bind_teampreview(self):
+        """Bind self.teampreview onto all underlying Player objects used by the env."""
+        try:
+            from poke_env.player import Player as _PEPlayer
+        except Exception:
+            return
+
+        def _bind_on(obj):
+            try:
+                bound = self.teampreview.__get__(obj, obj.__class__)
+                setattr(obj, "teampreview", bound)
+            except Exception:
+                pass
+
+        # If *we* are a Player (fallback path), bind on self as well.
+        if isinstance(self, _PEPlayer):
+            _bind_on(self)
+
+        # Common attribute names across poke-env versions
+        bound_attrs = []
+        for name in ("agent", "player", "env_player", "single_player", "_player", "_agent"):
+            obj = getattr(self, name, None)
+            if isinstance(obj, _PEPlayer):
+                _bind_on(obj)
+                bound_attrs.append(name)
+
+        # Scan remaining attributes just in case (future compatibility)
+        try:
+            for _, obj in vars(self).items():
+                if isinstance(obj, _PEPlayer):
+                    _bind_on(obj)
+                    bound_attrs.append("<var>")
+        except Exception:
+            pass
+
+        # Also bind on the lazily-created opponent if we made one
+        opp = getattr(self, "_current_opponent", None)
+        if isinstance(opp, _PEPlayer):
+            _bind_on(opp)
+            bound_attrs.append("_current_opponent")
+
+        try:
+            print(
+                f"[DEBUG] _bind_teampreview: bound on attrs={bound_attrs if bound_attrs else 'none'}",
+                flush=True,
+            )
+        except Exception:
+            pass
+
+    # Heuristic preview detector that works across poke-env versions
+    def _is_teampreview(self, battle: Battle) -> bool:
+        try:
+            if getattr(battle, "teampreview", None):
+                return True
+            turn = int(getattr(battle, "turn", 0))
+            if turn != 0:
+                return False
+            if getattr(battle, "max_team_size", None):
+                return True
+            if getattr(battle, "active_pokemon", None) is None:
+                return True
+        except Exception:
+            pass
+        return False
+
+    # Intercept Team Preview for older gym wrappers that route all requests through this hook
+    def _env_move(self, battle: Battle):  # type: ignore[override]
+        try:
+            turn = getattr(battle, "turn", None)
+            mts = getattr(battle, "max_team_size", None)
+            has_tp_attr = getattr(battle, "teampreview", None) is not None
+            has_active = getattr(battle, "active_pokemon", None) is not None
+            print(
+                f"[DEBUG] _env_move: called (turn={turn} max_team_size={mts} teampreview_attr={has_tp_attr} active_present={has_active})",
+                flush=True,
+            )
+        except Exception:
+            pass
+
+        if self._is_teampreview(battle):
+            choice = self.teampreview(battle)
+            # Ensure correct prefix
+            clean = choice.strip()
+            if not clean.startswith("/team"):
+                if clean.startswith("team"):
+                    clean = "/" + clean
+                else:
+                    clean = self.teampreview(battle)
+            print(f"[DEBUG] _env_move (preview): returning '{clean}'", flush=True)
+            return _OrderStub(clean)
+
+        # Defer to parent path when not in preview
+        parent_env_move = getattr(OpenAIGymEnv, "_env_move", None)
+        if parent_env_move is not None:
+            try:
+                print("[DEBUG] _env_move: delegating to parent _env_move", flush=True)
+            except Exception:
+                pass
+            return parent_env_move(self, battle)
+        # Fallback: delegate to agent/Player choose_move via __getattr__
+        try:
+            print("[DEBUG] _env_move: delegating to choose_move (fallback)", flush=True)
+        except Exception:
+            pass
+        return self.choose_move(battle)
+
+    def _install_player_preview_debug(self):
+        """Monkey-patch poke_env Player preview paths to emit debug logs once.
+
+        Helps confirm which hook is used by the installed poke-env version.
+        """
+        try:
+            from poke_env.player.player import Player as _BasePlayer
+        except Exception:
+            return
+        if getattr(_BasePlayer, "_metamon_preview_debug_installed", False):
+            return
+
+        # Patch Player.teampreview to log what it returns
+        try:
+            _orig_teampreview = _BasePlayer.teampreview  # type: ignore[attr-defined]
+
+            def _patched_teampreview(self, battle):  # type: ignore[no-redef]
+                try:
+                    choice = _orig_teampreview(self, battle)
+                except Exception as e:
+                    print(f"[DEBUG] Player.teampreview raised: {e}", flush=True)
+                    raise
+                print(f"[DEBUG] Player.teampreview: returning '{choice}'", flush=True)
+                return choice
+
+            setattr(_BasePlayer, "teampreview", _patched_teampreview)
+        except Exception:
+            pass
+
+        # Patch Player._handle_battle_request to log when preview requests happen
+        try:
+            _orig_hbr = _BasePlayer._handle_battle_request  # type: ignore[attr-defined]
+
+            async def _patched_hbr(self, battle, from_teampreview_request=False):  # type: ignore[no-redef]
+                try:
+                    print(
+                        f"[DEBUG] Player._handle_battle_request: from_teampreview_request={from_teampreview_request}",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+                return await _orig_hbr(
+                    self, battle, from_teampreview_request=from_teampreview_request
+                )
+
+            setattr(_BasePlayer, "_handle_battle_request", _patched_hbr)
+        except Exception:
+            pass
+
+        # Patch Player.choose_move to observe normal path usage
+        try:
+            import inspect as _inspect
+            _orig_choose = _BasePlayer.choose_move  # type: ignore[attr-defined]
+
+            if _inspect.iscoroutinefunction(_orig_choose):
+
+                async def _patched_choose(self, battle):  # type: ignore[no-redef]
+                    print("[DEBUG] Player.choose_move: entered", flush=True)
+                    choice = await _orig_choose(self, battle)
+                    try:
+                        msg = getattr(choice, 'message', None)
+                        print(
+                            f"[DEBUG] Player.choose_move: returned type={type(choice).__name__} msg={msg}",
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
+                    return choice
+
+                setattr(_BasePlayer, "choose_move", _patched_choose)
+            else:
+
+                def _patched_choose(self, battle):  # type: ignore[no-redef]
+                    print("[DEBUG] Player.choose_move: entered", flush=True)
+                    choice = _orig_choose(self, battle)
+                    try:
+                        msg = getattr(choice, 'message', None)
+                        print(
+                            f"[DEBUG] Player.choose_move: returned type={type(choice).__name__} msg={msg}",
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
+                    return choice
+
+                setattr(_BasePlayer, "choose_move", _patched_choose)
+        except Exception:
+            pass
+
+        # Patch Player._env_move if present to trace through
+        try:
+            _orig_penv = getattr(_BasePlayer, "_env_move", None)
+            if _orig_penv is not None:
+                def _patched_penv(self, battle):  # type: ignore
+                    print("[DEBUG] Player._env_move: entered", flush=True)
+                    ret = _orig_penv(self, battle)
+                    try:
+                        msg = getattr(ret, 'message', None)
+                        print(
+                            f"[DEBUG] Player._env_move: returned type={type(ret).__name__} msg={msg}",
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
+                    return ret
+
+                setattr(_BasePlayer, "_env_move", _patched_penv)
+        except Exception:
+            pass
+
+        setattr(_BasePlayer, "_metamon_preview_debug_installed", True)
+
+    def _install_asyncplayer_preview_patch(self):
+        """Patch poke_env.player.openai_api._AsyncPlayer._env_move to handle Team Preview.
+
+        Some versions route all requests (including preview) through _AsyncPlayer._env_move.
+        This ensures a '/team ...' string is returned at preview time.
+        """
+        try:
+            from poke_env.player.openai_api import _AsyncPlayer  # type: ignore
+        except Exception:
+            return
+        if getattr(_AsyncPlayer, "_metamon_preview_patch_installed", False):
+            return
+
+        orig = getattr(_AsyncPlayer, "_env_move", None)
+        if orig is None:
+            return
+
+        def _patched_env_move(self_ap, battle: Battle, *args, **kwargs):  # type: ignore
+            try:
+                print("[DEBUG] _AsyncPlayer._env_move: entered", flush=True)
+            except Exception:
+                pass
+            try:
+                env = getattr(self_ap, "env", None)
+                # Detect preview via env helper if available, else heuristics
+                is_preview = False
+                if env is not None and hasattr(env, "_is_teampreview"):
+                    is_preview = env._is_teampreview(battle)  # type: ignore[attr-defined]
+                else:
+                    turn = int(getattr(battle, "turn", 0))
+                    is_preview = (turn == 0) and (
+                        getattr(battle, "max_team_size", None) is not None
+                        or getattr(battle, "active_pokemon", None) is None
+                    )
+                try:
+                    print(f"[DEBUG] _AsyncPlayer._env_move: is_preview={is_preview}", flush=True)
+                except Exception:
+                    pass
+                if is_preview:
+                    # Build the '/team ...' string inline to avoid super()-related issues
+                    try:
+                        size_attr = getattr(battle, "max_team_size", None)
+                        if isinstance(size_attr, int) and size_attr > 0:
+                            size = size_attr
+                        else:
+                            team = getattr(battle, "team", None)
+                            size = len(team) if isinstance(team, dict) and team else 6
+                        clean = "/team " + "".join(str(i + 1) for i in range(int(size)))
+                    except Exception:
+                        clean = "/team 123456"
+                    print(f"[DEBUG] _AsyncPlayer._env_move (preview): returning '{clean}'", flush=True)
+                    return _OrderStub(clean)
+            except Exception as e:
+                try:
+                    print(f"[DEBUG] _AsyncPlayer._env_move: preview patch error: {e}", flush=True)
+                except Exception:
+                    pass
+            # Non-preview or on error: forward to original
+            try:
+                print("[DEBUG] _AsyncPlayer._env_move (normal): delegating to original", flush=True)
+            except Exception:
+                pass
+            choice = orig(self_ap, battle, *args, **kwargs)
+            try:
+                msg = getattr(choice, 'message', None)
+                print(f"[DEBUG] _AsyncPlayer._env_move (normal): returned choice type={type(choice).__name__} msg={msg}", flush=True)
+            except Exception:
+                pass
+            return choice
+
+        setattr(_AsyncPlayer, "_env_move", _patched_env_move)
+        setattr(_AsyncPlayer, "_metamon_preview_patch_installed", True)
 
     def resume_from_break(self):
         # Only start challenging if we've been initialized
@@ -708,6 +1094,14 @@ class QueueOnLocalLadder(PokeEnvWrapper):
             self.render()
         return next_state, reward, terminated, truncated, info
 
+    # ---- Team Preview ----
+    # Provide a concrete team preview method returning the Showdown command string.
+    # Older poke-env gym wrappers expect "/team 123456" and will pass this through.
+    def teampreview(self, battle: Battle) -> str:  # type: ignore[override]
+        choice = super().teampreview(battle)
+        print(f"[DEBUG] teampreview: returning '{choice}'", flush=True)
+        return choice
+
 
 PokeAgentServerConfiguration = ServerConfiguration(
     "wss://pokeagentshowdown.com/showdown/websocket",
@@ -744,3 +1138,19 @@ class PokeAgentLadder(QueueOnLocalLadder):
             "PAC"
         ), "Bot usernames should start with 'PAC'"
         super().start_laddering(n_challenges)
+# --- Compatibility: preview order stub ---------------------------------------
+class _OrderStub:
+    """Minimal object mimicking poke-env BattleOrder for preview.
+    Provides `.message` for code paths that expect an order, and `__str__`
+    so it can be used where a raw string is expected.
+    """
+    __slots__ = ("message",)
+
+    def __init__(self, message: str):
+        self.message = str(message)
+
+    def __str__(self) -> str:
+        return self.message
+
+    def __repr__(self) -> str:
+        return f"_OrderStub({self.message!r})"
