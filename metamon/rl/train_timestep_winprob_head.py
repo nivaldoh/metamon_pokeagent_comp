@@ -24,9 +24,11 @@ import wandb
 import amago
 
 from metamon.rl.pretrained import get_pretrained_model
-from metamon.rl.train import create_offline_dataset, WANDB_ENTITY, WANDB_PROJECT
 from metamon.interface import get_reward_function
 from metamon.rl.timestep_win_probability_head import MetamonTstepWinProbAgent
+from metamon.data import ParsedReplayDataset
+from metamon.rl.metamon_to_amago import MetamonAMAGODataset
+import metamon
 
 
 @dataclass
@@ -155,7 +157,44 @@ def main(cfg: TrainConfig):
     obs_space = pretrained.observation_space
     action_space = pretrained.action_space
     reward_fn = get_reward_function(cfg.reward_name)
-    amago_dset = create_offline_dataset(
+
+    # Create AMAGO dataset locally (avoid importing metamon.rl.train to prevent pulling baselines)
+    def _create_offline_dataset_local(
+        obs_space,
+        action_space,
+        reward_function,
+        parsed_replay_dir: Optional[str],
+        custom_replay_dir: Optional[str],
+        custom_replay_sample_weight: float,
+        formats: Optional[list[str]],
+    ):
+        formats2 = formats or metamon.SUPPORTED_BATTLE_FORMATS
+        dset_kwargs = {
+            "observation_space": obs_space,
+            "action_space": action_space,
+            "reward_function": reward_function,
+            "max_seq_len": None,
+            "formats": formats2,
+            "verbose": True,
+        }
+        parsed_replays_amago = MetamonAMAGODataset(
+            dset_name="Metamon Parsed Replays",
+            parsed_replay_dset=ParsedReplayDataset(dset_root=parsed_replay_dir, **dset_kwargs),
+        )
+        if custom_replay_dir is not None:
+            custom_dset_amago = MetamonAMAGODataset(
+                dset_name="Custom Parsed Replays",
+                parsed_replay_dset=ParsedReplayDataset(dset_root=custom_replay_dir, **dset_kwargs),
+            )
+            amago_dataset = amago.loading.MixtureOfDatasets(
+                datasets=[parsed_replays_amago, custom_dset_amago],
+                sampling_weights=[1 - custom_replay_sample_weight, custom_replay_sample_weight],
+            )
+        else:
+            amago_dataset = parsed_replays_amago
+        return amago_dataset
+
+    amago_dset = _create_offline_dataset_local(
         obs_space=obs_space,
         action_space=action_space,
         reward_function=reward_fn,
@@ -169,6 +208,10 @@ def main(cfg: TrainConfig):
 
     policy.to(device)
     head_wrapper.to(device)
+
+    # Local WANDB config (avoid importing metamon.rl.train to prevent heavy deps)
+    WANDB_PROJECT = os.environ.get("METAMON_WANDB_PROJECT")
+    WANDB_ENTITY = os.environ.get("METAMON_WANDB_ENTITY")
 
     if cfg.log:
         wandb.init(

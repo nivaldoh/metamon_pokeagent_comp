@@ -3,11 +3,6 @@ from metamon.rl.pretrained import (
     PretrainedModel,
     LocalFinetunedModel,
 )
-from metamon.rl.evaluate import (
-    pretrained_vs_pokeagent_ladder,
-    pretrained_vs_local_ladder,
-    pretrained_vs_baselines,
-)
 from metamon.rl.gcs_checkpoint import (
     GCSCheckpointManager,
     GCSCheckpointPatch,
@@ -20,6 +15,8 @@ from metamon.rl.win_probability_head import (
     MetamonWinProbAgent,
 )
 from metamon.rl.win_probability_experiment import MetamonWinProbExperiment
+from metamon.rl.win_probability_experiment_timestep import MetamonTstepWinProbExperiment
+from metamon.rl.timestep_win_probability_head import MetamonTstepWinProbAgent
 
 import os
 
