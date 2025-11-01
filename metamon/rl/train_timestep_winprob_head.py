@@ -63,6 +63,8 @@ class TrainConfig:
     calibrate_temperature: bool = False  # post-hoc temperature scaling on validation set
     # label smoothing strength for early steps (toward 0.5)
     alpha_max: float = 0.30
+    # validation determinism
+    val_seed: Optional[int] = 12345
 
 
 def last_true_idx(dones_bool_2d: torch.Tensor) -> torch.Tensor:
@@ -227,13 +229,32 @@ def main(cfg: TrainConfig):
     @torch.no_grad()
     def validate(collect_logits: bool = False) -> dict:
         head_wrapper.head.eval()
+        # Stabilize validation sampling for reproducibility
+        try:
+            import random as _py_random
+            import numpy as _np
+            if cfg.val_seed is not None:
+                torch.manual_seed(int(cfg.val_seed))
+                _py_random.seed(int(cfg.val_seed))
+                _np.random.seed(int(cfg.val_seed))
+        except Exception:
+            pass
         total = 0
         ys, ps = [], []
         z_list = []
-        # progress-bin accumulators for Brier per bin
+        # distance-to-terminal bins (0-20 early .. 80-100 late)
         bin_edges = torch.tensor([0.0, 0.2, 0.4, 0.6, 0.8, 1.0000001], device=device)
-        bin_se_sum = torch.zeros(len(bin_edges) - 1, dtype=torch.float64)
-        bin_counts = torch.zeros(len(bin_edges) - 1, dtype=torch.int64)
+        dist_se_sum = torch.zeros(len(bin_edges) - 1, dtype=torch.float64)
+        dist_counts = torch.zeros(len(bin_edges) - 1, dtype=torch.int64)
+        dist_acc_correct = torch.zeros(len(bin_edges) - 1, dtype=torch.int64)
+        dist_acc_notie_correct = torch.zeros(len(bin_edges) - 1, dtype=torch.int64)
+        dist_notie_counts = torch.zeros(len(bin_edges) - 1, dtype=torch.int64)
+        # late-bin sign match accumulators (use last bin)
+        late_sign_correct = 0
+        late_sign_total = 0
+        # means
+        progress_running_sum = 0.0
+        progress_running_count = 0
         with torch.cuda.amp.autocast(enabled=cfg.mixed_precision and torch.cuda.is_available()):
             pbar_v = tqdm(total=cfg.val_steps, desc="Val", leave=False)
             while total < cfg.val_steps:
@@ -248,6 +269,9 @@ def main(cfg: TrainConfig):
                     tail_gamma=cfg.tail_gamma,
                     fixed_offset_k=cfg.fixed_offset_k,
                 )
+                # Clamp to last pre-terminal for safety (should already hold)
+                last_done = last_true_idx(batch.dones.squeeze(-1).bool())  # [B]
+                t_idxs = torch.minimum(t_idxs, last_done)
                 _, logits_sel = head_wrapper.current_step_logits_from_batch(batch, t_idxs)
                 p = torch.sigmoid(logits_sel).squeeze(-1)  # [B]
                 y = build_label_from_batch(batch).squeeze(-1)  # [B]
@@ -255,19 +279,38 @@ def main(cfg: TrainConfig):
                 ps.append(p.detach().cpu())
                 if collect_logits:
                     z_list.append(logits_sel.detach().cpu())
-                # per-bin Brier (by progress)
-                last_done = last_true_idx(batch.dones.squeeze(-1).bool())  # [B]
+                # per-bin Brier/Acc using distance-to-terminal
                 progress = (t_idxs.float() + 1) / (last_done.float() + 1)  # [B]
+                distance = (1.0 - progress).clamp(0, 1)  # [B]
+                progress_running_sum += float(progress.sum().item())
+                progress_running_count += int(progress.numel())
                 se = (p.detach() - y.detach()).pow(2).cpu().double()
-                prog_cpu = progress.detach().cpu().double()
-                # assign bins
+                correct01 = ((p.detach() >= 0.5) == (y.detach() >= 0.5)).cpu()
+                not_tie = (y.detach() != 0.5).cpu()
+                logits_cpu = logits_sel.detach().squeeze(-1).cpu()
+                dist_cpu = distance.detach().cpu().double()
+                # assign bins by distance
                 for b in range(len(bin_edges) - 1):
                     lo = float(bin_edges[b].cpu())
                     hi = float(bin_edges[b + 1].cpu())
-                    sel = (prog_cpu >= lo) & (prog_cpu < hi)
+                    sel = (dist_cpu >= lo) & (dist_cpu < hi)
                     if sel.any():
-                        bin_se_sum[b] += se[sel].sum().item()
-                        bin_counts[b] += int(sel.sum().item())
+                        dist_se_sum[b] += se[sel].sum().item()
+                        cnt = int(sel.sum().item())
+                        dist_counts[b] += cnt
+                        dist_acc_correct[b] += int(correct01[sel].sum().item())
+                        # tie-robust accuracy
+                        sel_notie = sel & not_tie
+                        if sel_notie.any():
+                            dist_acc_notie_correct[b] += int(correct01[sel_notie].sum().item())
+                            dist_notie_counts[b] += int(sel_notie.sum().item())
+                        # late-bin sign-match: use last bin only
+                        if b == len(bin_edges) - 2:
+                            # compare sign(logit) to (y>0.5), ignore ties
+                            nz = sel_notie
+                            if nz.any():
+                                late_sign_correct += int(((logits_cpu[nz] > 0) == (y.detach().cpu()[nz] > 0.5)).sum().item())
+                                late_sign_total += int(nz.sum().item())
                 total += y.shape[0]
                 pbar_v.update(y.shape[0])
             pbar_v.close()
@@ -298,23 +341,45 @@ def main(cfg: TrainConfig):
         except Exception:
             auc = float("nan")
 
-        out = {"val/brier": brier, "val/acc@0.5": acc, "val/auc": auc}
-        # per-bin Brier and macro average (unweighted across non-empty bins)
+        out = {
+            "val/brier": brier,
+            "val/acc@0.5": acc,
+            "val/acc@0.5_no_ties": float(((p_all >= 0.5) == (y_all >= 0.5))[y_all != 0.5].mean()) if (y_all != 0.5).any() else float("nan"),
+            "val/auc": auc,
+            "val/mean_progress": float(progress_running_sum / max(1, progress_running_count)),
+            "val/mean_distance": float(1.0 - (progress_running_sum / max(1, progress_running_count))),
+            "val/seed": int(cfg.val_seed) if cfg.val_seed is not None else -1,
+            "val/config_step_sampling": cfg.step_sampling,
+            "val/config_tail_gamma": float(cfg.tail_gamma),
+            "val/config_mix_uniform_prob": float(cfg.mix_uniform_prob),
+            "val/temperature_used": 1.0,
+        }
+        # per-bin Brier/Acc over distance bins and macro average (unweighted across non-empty bins)
         bin_labels = ["0_20", "20_40", "40_60", "60_80", "80_100"]
         non_empty_bins = 0
         macro_sum = 0.0
         for i, label in enumerate(bin_labels):
-            if bin_counts[i] > 0:
-                val = float(bin_se_sum[i] / bin_counts[i])
-                out[f"val/brier_bin_{label}"] = val
+            if dist_counts[i] > 0:
+                val = float(dist_se_sum[i] / dist_counts[i])
+                out[f"val/brier_dist_bin_{label}"] = val
+                out[f"val/acc@0.5_dist_bin_{label}"] = float(dist_acc_correct[i] / dist_counts[i])
+                out[f"val/acc@0.5_no_ties_dist_bin_{label}"] = (
+                    float(dist_acc_notie_correct[i] / dist_notie_counts[i]) if dist_notie_counts[i] > 0 else float("nan")
+                )
+                out[f"val/dist_bin_count_{label}"] = int(dist_counts[i])
                 macro_sum += val
                 non_empty_bins += 1
             else:
-                out[f"val/brier_bin_{label}"] = float("nan")
+                out[f"val/brier_dist_bin_{label}"] = float("nan")
+                out[f"val/acc@0.5_dist_bin_{label}"] = float("nan")
+                out[f"val/acc@0.5_no_ties_dist_bin_{label}"] = float("nan")
+                out[f"val/dist_bin_count_{label}"] = 0
         if non_empty_bins > 0:
-            out["val/brier_macro"] = macro_sum / non_empty_bins
+            out["val/brier_dist_macro"] = macro_sum / non_empty_bins
         else:
-            out["val/brier_macro"] = float("nan")
+            out["val/brier_dist_macro"] = float("nan")
+        # late-bin sign match (ignoring ties)
+        out["val/late_sign_match"] = (float(late_sign_correct / late_sign_total) if late_sign_total > 0 else float("nan"))
         if z_all is not None:
             out["val/logits"] = z_all
             out["val/labels"] = y_all
@@ -474,6 +539,7 @@ if __name__ == "__main__":
     parser.add_argument("--mix_uniform_prob", type=float, default=0.0, help="Probability to sample uniform step instead of --step_sampling")
     parser.add_argument("--calibrate_temperature", action="store_true", help="Fit a scalar temperature on validation logits and save it")
     parser.add_argument("--alpha_max", type=float, default=0.30, help="Max smoothing toward 0.5 for earliest steps")
+    parser.add_argument("--val_seed", type=int, default=12345, help="Random seed for validation sampling")
     args = parser.parse_args()
 
     if args.formats is None:
@@ -502,5 +568,6 @@ if __name__ == "__main__":
         mix_uniform_prob=args.mix_uniform_prob,
         calibrate_temperature=args.calibrate_temperature,
         alpha_max=args.alpha_max,
+        val_seed=args.val_seed,
     )
     main(cfg)
