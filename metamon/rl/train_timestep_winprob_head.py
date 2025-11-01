@@ -3,9 +3,10 @@
 Train a timestep-only WinProbability head on top of a frozen pretrained model.
 
 This finetunes a small MLP head directly on the timestep encoder outputs and
-does not use the trajectory encoder. Training is single-timestep to mirror
-inference, selecting one timestep per sequence (default: tail-biased toward
-late timesteps). Labels come from the final outcome (terminal reward sign).
+does not use the trajectory encoder. Training uses all valid timesteps with a
+distance-to-terminal weighting to reduce Monte-Carlo label noise while keeping
+supervision aligned with inference. Labels come from the final outcome (terminal
+reward sign) interpreted from our oriented observation (battle.team/opponent_team).
 """
 
 from __future__ import annotations
@@ -60,6 +61,8 @@ class TrainConfig:
     fixed_offset_k: int = 0   # last_done - k (clamped >= 0)
     mix_uniform_prob: float = 0.0  # probability to use uniform instead of step_sampling
     calibrate_temperature: bool = False  # post-hoc temperature scaling on validation set
+    # label smoothing strength for early steps (toward 0.5)
+    alpha_max: float = 0.30
 
 
 def last_true_idx(dones_bool_2d: torch.Tensor) -> torch.Tensor:
@@ -227,21 +230,44 @@ def main(cfg: TrainConfig):
         total = 0
         ys, ps = [], []
         z_list = []
+        # progress-bin accumulators for Brier per bin
+        bin_edges = torch.tensor([0.0, 0.2, 0.4, 0.6, 0.8, 1.0000001], device=device)
+        bin_se_sum = torch.zeros(len(bin_edges) - 1, dtype=torch.float64)
+        bin_counts = torch.zeros(len(bin_edges) - 1, dtype=torch.int64)
         with torch.cuda.amp.autocast(enabled=cfg.mixed_precision and torch.cuda.is_available()):
             pbar_v = tqdm(total=cfg.val_steps, desc="Val", leave=False)
             while total < cfg.val_steps:
                 samples = [amago_dset.sample_random_trajectory() for _ in range(cfg.batch_size)]
                 batch = amago.loading.RLData_pad_collate(samples).to(device)
-                # Evaluate at last pre-terminal timestep per sequence
-                last_done = last_true_idx(batch.dones.squeeze(-1).bool())
-                # current_step_logits_from_batch expects t_idxs; use last_done here
-                _, logits_sel = head_wrapper.current_step_logits_from_batch(batch, last_done)
+                # Evaluate at a timestep sampled like training (matched distribution)
+                choose_uniform = (cfg.mix_uniform_prob > 0.0) and (torch.rand(()) < cfg.mix_uniform_prob)
+                mode = "uniform" if choose_uniform else cfg.step_sampling
+                t_idxs = _select_t_idxs(
+                    batch,
+                    mode=mode,
+                    tail_gamma=cfg.tail_gamma,
+                    fixed_offset_k=cfg.fixed_offset_k,
+                )
+                _, logits_sel = head_wrapper.current_step_logits_from_batch(batch, t_idxs)
                 p = torch.sigmoid(logits_sel).squeeze(-1)  # [B]
                 y = build_label_from_batch(batch).squeeze(-1)  # [B]
                 ys.append(y.detach().cpu())
                 ps.append(p.detach().cpu())
                 if collect_logits:
                     z_list.append(logits_sel.detach().cpu())
+                # per-bin Brier (by progress)
+                last_done = last_true_idx(batch.dones.squeeze(-1).bool())  # [B]
+                progress = (t_idxs.float() + 1) / (last_done.float() + 1)  # [B]
+                se = (p.detach() - y.detach()).pow(2).cpu().double()
+                prog_cpu = progress.detach().cpu().double()
+                # assign bins
+                for b in range(len(bin_edges) - 1):
+                    lo = float(bin_edges[b].cpu())
+                    hi = float(bin_edges[b + 1].cpu())
+                    sel = (prog_cpu >= lo) & (prog_cpu < hi)
+                    if sel.any():
+                        bin_se_sum[b] += se[sel].sum().item()
+                        bin_counts[b] += int(sel.sum().item())
                 total += y.shape[0]
                 pbar_v.update(y.shape[0])
             pbar_v.close()
@@ -273,6 +299,22 @@ def main(cfg: TrainConfig):
             auc = float("nan")
 
         out = {"val/brier": brier, "val/acc@0.5": acc, "val/auc": auc}
+        # per-bin Brier and macro average (unweighted across non-empty bins)
+        bin_labels = ["0_20", "20_40", "40_60", "60_80", "80_100"]
+        non_empty_bins = 0
+        macro_sum = 0.0
+        for i, label in enumerate(bin_labels):
+            if bin_counts[i] > 0:
+                val = float(bin_se_sum[i] / bin_counts[i])
+                out[f"val/brier_bin_{label}"] = val
+                macro_sum += val
+                non_empty_bins += 1
+            else:
+                out[f"val/brier_bin_{label}"] = float("nan")
+        if non_empty_bins > 0:
+            out["val/brier_macro"] = macro_sum / non_empty_bins
+        else:
+            out["val/brier_macro"] = float("nan")
         if z_all is not None:
             out["val/logits"] = z_all
             out["val/labels"] = y_all
@@ -304,24 +346,22 @@ def main(cfg: TrainConfig):
             batch = amago.loading.RLData_pad_collate(samples).to(device)
 
             with torch.cuda.amp.autocast(enabled=cfg.mixed_precision and torch.cuda.is_available()):
-                # select current step per sequence (no future, optionally tail-biased)
-                choose_uniform = (cfg.mix_uniform_prob > 0.0) and (torch.rand(()) < cfg.mix_uniform_prob)
-                mode = "uniform" if choose_uniform else cfg.step_sampling
-                t_idxs = _select_t_idxs(
-                    batch,
-                    mode=mode,
-                    tail_gamma=cfg.tail_gamma,
-                    fixed_offset_k=cfg.fixed_offset_k,
-                )
-                _, logits_sel = head_wrapper.current_step_logits_from_batch(batch, t_idxs)
-                # Progress-aware label smoothing toward 0.5 for early steps
-                last_done = last_true_idx(batch.dones.squeeze(-1).bool())
-                progress = (t_idxs.float() + 1) / (last_done.float() + 1)
-                alpha_max = 0.10
-                alpha = (1.0 - progress).clamp(0, 1) * alpha_max
-                y = build_label_from_batch(batch)
-                y_smooth = (1 - alpha).unsqueeze(-1) * y + alpha.unsqueeze(-1) * 0.5
-                loss = F.binary_cross_entropy_with_logits(logits_sel, y_smooth)
+                # All-timestep logits and valid mask
+                _, logits_all, valid_mask = head_wrapper.logits_all_steps_from_batch(batch)  # [B,L,1], [B,L,1]
+                # Distance-aware weights (progress in [0,1])
+                last_done = last_true_idx(batch.dones.squeeze(-1).bool())  # [B]
+                B, L, _ = logits_all.shape
+                t = torch.arange(L, device=logits_all.device).unsqueeze(0).expand(B, L)  # [B,L]
+                progress = (t + 1) / (last_done.unsqueeze(1).float() + 1)  # [B,L]
+                w = (progress.clamp(0, 1).pow(cfg.tail_gamma) * valid_mask.squeeze(-1).float()).detach()  # [B,L]
+                # Labels broadcast across time with stronger early smoothing toward 0.5
+                y = build_label_from_batch(batch)  # [B,1]
+                y_all = y.unsqueeze(1).expand_as(logits_all)  # [B,L,1]
+                alpha = (1.0 - progress).clamp(0, 1) * cfg.alpha_max  # [B,L]
+                y_smooth = (1 - alpha).unsqueeze(-1) * y_all + alpha.unsqueeze(-1) * 0.5  # [B,L,1]
+                per = F.binary_cross_entropy_with_logits(logits_all, y_smooth, reduction="none").squeeze(-1)  # [B,L]
+                denom = (w.sum() + 1e-8)
+                loss = (per * w).sum() / denom
 
             # backward
             scaler.scale(loss / cfg.grad_accum).backward()
@@ -433,6 +473,7 @@ if __name__ == "__main__":
     parser.add_argument("--fixed_offset_k", type=int, default=0, help="For fixed_offset: use last_done - k (clamped >= 0)")
     parser.add_argument("--mix_uniform_prob", type=float, default=0.0, help="Probability to sample uniform step instead of --step_sampling")
     parser.add_argument("--calibrate_temperature", action="store_true", help="Fit a scalar temperature on validation logits and save it")
+    parser.add_argument("--alpha_max", type=float, default=0.30, help="Max smoothing toward 0.5 for earliest steps")
     args = parser.parse_args()
 
     if args.formats is None:
@@ -460,5 +501,6 @@ if __name__ == "__main__":
         fixed_offset_k=args.fixed_offset_k,
         mix_uniform_prob=args.mix_uniform_prob,
         calibrate_temperature=args.calibrate_temperature,
+        alpha_max=args.alpha_max,
     )
     main(cfg)

@@ -4,6 +4,9 @@ from __future__ import annotations
 Experiment subclass that exposes win probability from the current env state
 without generating actions. External modules can drive env.step() and call
 `compute_prob_current_state(envs)` to get a [B] array of probabilities.
+
+Orientation: observations are oriented as our team vs opponent_team; returned
+probabilities reflect our chance to win from the current state.
 """
 
 from typing import Optional, Iterable
@@ -51,6 +54,9 @@ class MetamonWinProbExperiment(amago.Experiment):
         Does not call env.step(). It reads env state via current_timestep,
         encodes it with the model (tstep_encoder + traj_encoder), and applies
         the win probability head to the last valid step.
+
+        Orientation: the probability is for the (our) player implied by the
+        observation's team/opponent_team ordering.
 
         Args:
             envs: The same vectorized env pool used by the controller driving step().

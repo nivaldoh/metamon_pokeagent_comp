@@ -7,6 +7,9 @@ This module attaches the existing WinProbabilityHead MLP directly on top of the
 AMAGO timestep encoder outputs (ignores the trajectory encoder). It mirrors the
 API of the sequence-based wrapper but computes representations per step using
 only the tstep encoder.
+
+Orientation: inputs are always formed as our team vs opponent_team. The head
+predicts our win probability from that oriented observation.
 """
 
 from typing import Optional, Tuple, Type
@@ -24,7 +27,8 @@ class MetamonTstepWinProbAgent(nn.Module):
 
     The base agent remains frozen; this wrapper exposes helpers to obtain logits
     per timestep without using the trajectory encoder. The head is the only
-    component intended to be trained.
+    component intended to be trained. Observations are oriented as
+    (our team, opponent team); predictions are our win probabilities.
     """
 
     def __init__(
