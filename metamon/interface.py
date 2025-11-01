@@ -255,16 +255,30 @@ class UniversalMove:
     def from_Move(cls, move: Optional[Move]):
         if move is None:
             return cls.blank_move()
-        assert isinstance(move, Move)
+        # Accept both pip and local poke_env Move types by attribute access
+        try:
+            name = getattr(move, "id", None) or getattr(move, "lookup_name", None) or getattr(move, "name", "nomove")
+            category_obj = getattr(move, "category", None)
+            category = clean_name(getattr(category_obj, "name", category_obj) if category_obj is not None else "nomove")
+            base_power = int(getattr(move, "base_power", getattr(move, "basePower", 0)) or 0)
+            type_obj = getattr(move, "type", None)
+            move_type = clean_name(getattr(type_obj, "name", type_obj) if type_obj is not None else "notype")
+            priority = int(getattr(move, "priority", 0) or 0)
+            accuracy = float(getattr(move, "accuracy", 1.0) or 1.0)
+            current_pp = int(getattr(move, "current_pp", getattr(move, "pp", 0)) or 0)
+            max_pp = int(getattr(move, "max_pp", getattr(move, "maximum_pp", current_pp)) or current_pp)
+        except Exception:
+            # Fallback to blanks on unexpected structure
+            return cls.blank_move()
         return cls(
-            name=move_name(move.id),
-            category=clean_name(move.category.name),
-            base_power=move.base_power,
-            move_type=clean_name(move.type.name),
-            priority=move.priority,
-            accuracy=move.accuracy,
-            current_pp=move.current_pp,
-            max_pp=move.max_pp,
+            name=move_name(name),
+            category=category,
+            base_power=base_power,
+            move_type=move_type,
+            priority=priority,
+            accuracy=accuracy,
+            current_pp=current_pp,
+            max_pp=max_pp,
         )
 
 
@@ -375,14 +389,20 @@ class UniversalPokemon:
     def universal_effects(effect: Optional[Effect]) -> str:
         if not effect:
             return "noeffect"
-        return clean_no_numbers(effect.name)
+        # Accept both pip and local types; fallback to string
+        name = getattr(effect, "name", None)
+        if isinstance(name, str) and name:
+            return clean_no_numbers(name)
+        return clean_no_numbers(str(effect))
 
     @staticmethod
     def universal_status(status_rep: Status | ReplayNothing) -> str:
         if status_rep is None or status_rep == ReplayNothing.NO_STATUS:
             return "nostatus"
-        assert isinstance(status_rep, Status)
-        return clean_no_numbers(status_rep.name)
+        # Accept both pip and local status representations
+        if hasattr(status_rep, "name"):
+            return clean_no_numbers(getattr(status_rep, "name"))
+        return clean_no_numbers(str(status_rep))
 
     @staticmethod
     def universal_types(type_rep: list, force_two: bool = True) -> str:
@@ -393,8 +413,8 @@ class UniversalPokemon:
         for type in type_rep:
             if type is None or type == ReplayNothing.NO_TERA_TYPE:
                 type_strs.append("notype")
-            elif isinstance(type, PokemonType):
-                type_strs.append(clean_name(type.name))
+            elif hasattr(type, "name"):
+                type_strs.append(clean_name(getattr(type, "name")))
             elif isinstance(type, str):
                 type_strs.append(clean_name(type))
         return " ".join(sorted(type_strs))
@@ -439,23 +459,40 @@ class UniversalPokemon:
             return cls.blank()
         # do not use Battle.available_moves
         # NOTE: new replay parser lets movesets go over 4 for some dittos... so temporary fix here
-        moves = [UniversalMove.from_Move(move) for move in pokemon.moves.values()][:4]
-        boosts = {f"{stat}_boost": boost for stat, boost in pokemon.boosts.items()}
-        stats = {f"base_{stat}": val for stat, val in pokemon.base_stats.items()}
-        if pokemon.effects:
-            most_recent_effect = min(pokemon.effects.keys(), key=pokemon.effects.get)
+        try:
+            move_vals = getattr(pokemon, "moves", {}) or {}
+            move_iter = move_vals.values() if hasattr(move_vals, "values") else []
+            moves = [UniversalMove.from_Move(m) for m in move_iter][:4]
+        except Exception:
+            moves = []
+        try:
+            raw_boosts = (getattr(pokemon, "boosts", {}) or {})
+            allowed = ["atk", "spa", "def", "spd", "spe", "accuracy", "evasion"]
+            boosts = {f"{k}_boost": int(raw_boosts.get(k, 0)) for k in allowed}
+        except Exception:
+            boosts = {"atk_boost": 0, "spa_boost": 0, "def_boost": 0, "spd_boost": 0, "spe_boost": 0, "accuracy_boost": 0, "evasion_boost": 0}
+        try:
+            stats = {f"base_{stat}": val for stat, val in (getattr(pokemon, "base_stats", {}) or {}).items()}
+        except Exception:
+            stats = {"base_atk": 0, "base_spa": 0, "base_def": 0, "base_spd": 0, "base_spe": 0, "base_hp": 0}
+        effects = getattr(pokemon, "effects", None)
+        if effects:
+            try:
+                most_recent_effect = min(effects.keys(), key=effects.get)
+            except Exception:
+                most_recent_effect = None
         else:
             most_recent_effect = None
         return cls(
-            name=pokemon_name(pokemon.species),
-            base_species=pokemon_name(pokemon.base_species),
-            hp_pct=float(pokemon.current_hp_fraction),
-            types=cls.universal_types(pokemon.types),
-            tera_type=cls.universal_types([pokemon.tera_type], force_two=False),
-            item=cls.universal_items(pokemon.item),
-            ability=cls.universal_abilities(pokemon.ability),
-            lvl=pokemon.level,
-            status=cls.universal_status(pokemon.status),
+            name=pokemon_name(getattr(pokemon, "species", "unknown")),
+            base_species=pokemon_name(getattr(pokemon, "base_species", getattr(pokemon, "species", "unknown"))),
+            hp_pct=float(getattr(pokemon, "current_hp_fraction", 0.0)),
+            types=cls.universal_types(getattr(pokemon, "types", []) or []),
+            tera_type=cls.universal_types([getattr(pokemon, "tera_type", None)], force_two=False),
+            item=cls.universal_items(getattr(pokemon, "item", None)),
+            ability=cls.universal_abilities(getattr(pokemon, "ability", None)),
+            lvl=getattr(pokemon, "level", 100),
+            status=cls.universal_status(getattr(pokemon, "status", None)),
             effect=cls.universal_effects(most_recent_effect),
             moves=moves,
             **(boosts | stats),
@@ -551,17 +588,28 @@ class UniversalState:
     def universal_conditions(condition_rep) -> str:
         if not condition_rep:
             return "noconditions"
-        most_recent = max(condition_rep.keys(), key=condition_rep.get)
-        assert isinstance(most_recent, SideCondition)
-        return clean_no_numbers(most_recent.name)
+        try:
+            most_recent = max(condition_rep.keys(), key=condition_rep.get)
+        except Exception:
+            # Not a dict-like or empty
+            return "noconditions"
+        name = getattr(most_recent, "name", None)
+        if isinstance(name, str) and name:
+            return clean_no_numbers(name)
+        return clean_no_numbers(str(most_recent))
 
     @staticmethod
     def universal_field(field_rep) -> str:
         if not field_rep:
             return "nofield"
-        most_recent = max(field_rep.keys(), key=field_rep.get)
-        assert isinstance(most_recent, Field)
-        return clean_no_numbers(most_recent.name)
+        try:
+            most_recent = max(field_rep.keys(), key=field_rep.get)
+        except Exception:
+            return "nofield"
+        name = getattr(most_recent, "name", None)
+        if isinstance(name, str) and name:
+            return clean_no_numbers(name)
+        return clean_no_numbers(str(most_recent))
 
     @staticmethod
     def universal_weather(weather_rep) -> str:
@@ -619,8 +667,29 @@ class UniversalState:
         player_prev_move = UniversalMove.from_Move(getattr(getattr(battle, 'active_pokemon', None), 'previous_move', None))
         opponent_prev_move = UniversalMove.from_Move(getattr(getattr(battle, 'opponent_active_pokemon', None), 'previous_move', None))
         # NOTE: always assumes 6 in the party, and this will probably never change for backwards compat
-        opponents_remaining = 6 - sum(p.status == Status.FNT for p in battle.opponent_team.values())
-        opponent_teampreview = [pokemon_name(p.base_species) for p in battle.teampreview_opponent_team if p is not None]
+        def _is_fainted(p):
+            try:
+                if hasattr(p, 'fainted'):
+                    return bool(getattr(p, 'fainted'))
+                st = getattr(p, 'status', None)
+                sname = getattr(st, 'name', None)
+                if isinstance(sname, str):
+                    return sname.lower() == 'fnt'
+                return str(st).lower() == 'status.fnt'
+            except Exception:
+                return False
+        try:
+            opponents_remaining = 6 - sum(_is_fainted(p) for p in battle.opponent_team.values())
+        except Exception:
+            opponents_remaining = 6
+        # Teampreview list may not be exposed on all battle forks
+        if hasattr(battle, 'teampreview_opponent_team'):
+            try:
+                opponent_teampreview = [pokemon_name(p.base_species) for p in battle.teampreview_opponent_team if p is not None]
+            except Exception:
+                opponent_teampreview = []
+        else:
+            opponent_teampreview = []
         force_switch = battle.force_switch
         if isinstance(force_switch, list):
             force_switch = force_switch[0]
