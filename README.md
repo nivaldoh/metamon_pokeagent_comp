@@ -1,3 +1,17 @@
+## About this fork
+
+I used this fork of [Metamon](https://github.com/UT-Austin-RPL/metamon) during the PokéAgent Challenge at NeurIPS 2025 (team MetaHorns, quarterfinalist in Gen 1 OU and Gen 9 OU). What I added is a way to run Metamon self-play as a Cloud Run Job:
+
+- `Dockerfile` and `cloudbuild.yaml` build one image with Metamon, AMAGO and a Pokémon Showdown server; [`docker/README.md`](docker/README.md) has the details.
+- `docker/with_showdown.sh` starts a private Showdown server inside each container and waits until it answers; `docker/run_self_play.sh` reads that task's row of a manifest and runs battles between two Metamon agents.
+- `manifests/selfplay_rlv1.jsonl` and `manifests/selfplay_rlv2.jsonl` list the self-play tasks for a Cloud Run Job, one row per task.
+- `metamon/rl/win_probability_head.py` and the related `win_probability_*` files are training experiments from the same period; none of them is documented as part of a tournament entry.
+
+Workers only load checkpoints and write trajectories; training on those trajectories is a separate step. I kept no run logs, so there are no battle counts or costs here.
+
+Everything below is the upstream Metamon README by Jake Grigsby and colleagues at UT Austin's Robot Perception and Learning Lab.
+
+---
 
 <div align="center">
     <img src="media/metamon_text_logo.png" alt="Metamon Text Logo" width="410">
